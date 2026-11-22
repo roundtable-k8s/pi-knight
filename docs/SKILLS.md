@@ -25,7 +25,7 @@ Pi SDK loads skills from multiple locations (first-write-wins on name collisions
 
 ## Git-Sync Integration
 
-The arsenal repo is mounted at `/skills/` via git-sync sidecar:
+The [arsenal repo](https://github.com/roundtable-k8s/arsenal) is mounted at `/skills/` via git-sync sidecar:
 
 ```
 /skills/

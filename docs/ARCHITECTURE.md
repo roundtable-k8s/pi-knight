@@ -71,7 +71,7 @@ Each knight runs as a Kubernetes pod with 2-3 containers:
 - Exposes health/metrics endpoints
 
 ### git-sync (sidecar)
-- Syncs `roundtable-arsenal` repo to `/skills`
+- Syncs the [`roundtable-k8s/arsenal`](https://github.com/roundtable-k8s/arsenal) repo to `/skills`
 - Pi SDK's skill loader handles symlinks and dedup natively
 
 ### chrome (optional sidecar)
