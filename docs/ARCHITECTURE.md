@@ -7,22 +7,23 @@
 Pi-Knight is a purpose-built agent harness built on Pi's layered SDK. Every knight runs the same image — differentiation comes from configuration, not code.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Pi-Knight Pod                      │
-│                                                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │  pi-knight   │  │   git-sync   │  │  (chrome)  │ │
-│  │  container   │  │   sidecar    │  │  optional  │ │
-│  └──────┬───────┘  └──────┬───────┘  └────────────┘ │
-│         │                 │                          │
-│    ┌────┴────┐      ┌────┴─────┐                    │
-│    │  /data  │      │ /skills  │                    │
-│    │  (PVC)  │      │(emptyDir)│                    │
-│    └─────────┘      └──────────┘                    │
-└─────────────────────────────────────────────────────┘
-         │                              │
-    NATS JetStream                Shared Vault
-   (database ns)               (CephFS /vault)
+┌────────────────────────────────────────────────────────────────────┐
+│                          Pi-Knight Pod                             │
+│                                                                    │
+│  ┌────────────┐  ┌──────────────────┐  ┌──────────────┐  ┌───────┐ │
+│  │ pi-knight  │  │ git-sync         │  │ skill-filter │  │chrome │ │
+│  │ container  │  │ git-sync-<name>… │  │   sidecar    │  │(opt.) │ │
+│  └─────┬──────┘  └────────┬─────────┘  └──────┬───────┘  └───────┘ │
+│        │                  │ writes            │ reads /arsenal     │
+│        │                  ▼                   │ writes /skills     │
+│   ┌────┴────┐      ┌─────────────┐      ┌─────┴──────┐             │
+│   │  /data  │      │  /arsenal   │      │  /skills   │◄── pi-knight│
+│   │  (PVC)  │      │ (emptyDir)  │      │ (emptyDir) │    (ro)     │
+│   └─────────┘      └─────────────┘      └────────────┘             │
+└────────────────────────────────────────────────────────────────────┘
+         │                                         │
+    NATS JetStream                           Shared Vault
+   (database ns)                          (CephFS /vault)
 ```
 
 ## Design
@@ -61,7 +62,7 @@ Pi-Knight is a purpose-built agent harness built on Pi's layered SDK. Every knig
 
 ## Pod Architecture
 
-Each knight runs as a Kubernetes pod with 2-3 containers:
+Each knight runs as a Kubernetes pod with the main container, one git-sync sidecar per arsenal, the skill-filter sidecar, and optionally Chrome:
 
 ### pi-knight (main container)
 - The agent runtime
@@ -70,9 +71,16 @@ Each knight runs as a Kubernetes pod with 2-3 containers:
 - Publishes results back to NATS
 - Exposes health/metrics endpoints
 
-### git-sync (sidecar)
-- Syncs the [`roundtable-k8s/arsenal`](https://github.com/roundtable-k8s/arsenal) repo to `/skills`
-- Pi SDK's skill loader handles symlinks and dedup natively
+### git-sync (one sidecar per arsenal)
+- One sidecar per arsenal repo: `git-sync` for `spec.arsenal` (default [`roundtable-k8s/arsenal`](https://github.com/roundtable-k8s/arsenal)), `git-sync-<name>` for each `spec.arsenals` entry
+- Each syncs into its own root `/arsenal/.sync/<name>` and exposes the current tree at `/arsenal/<name>` (name defaults to the repo basename)
+- The `arsenal` volume is mounted at `/arsenal`, not `/skills`
+
+### skill-filter (sidecar)
+- Builds `/skills/<category>/<skill>` symlinks for the categories in the Knight's `spec.skills`
+- Merges per skill across arsenals: the **last** arsenal (order: `arsenal`, then `arsenals`) that provides `<category>/<skill>` wins
+- Re-runs every 60s and prunes skills removed upstream
+- pi-knight loads everything under `/skills`; the Pi SDK loader follows the symlinked skill dirs
 
 ### chrome (optional sidecar)
 - Headless Chrome for web research tasks
