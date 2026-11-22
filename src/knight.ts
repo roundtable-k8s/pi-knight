@@ -12,6 +12,7 @@ import { subagentTools, setParentModel, setParentKnight } from "./tools/subagent
 import { browserTools } from "./tools/browser.js";
 import { setupToolHooks } from "./hooks.js";
 import { setupCompactionHook, updateSessionNotes } from "./memory.js";
+import { decideRunSession, pruneSessionFiles } from "./sessions.js";
 import { describeSessionFailure, getBestAssistantResult, resolveTaskOutcome, summarizeSessionTail } from "./result-extraction.js";
 
 
@@ -62,6 +63,28 @@ export function warmSession(config: KnightConfig): void {
     .catch((err) =>
       log.warn("Session pre-warm failed — first task will retry", { error: String(err) }),
     );
+}
+
+/**
+ * Enforce the on-disk session retention policy (fire-and-forget). Per-run sessions
+ * each persist their own JSONL file, so without this the PVC grows with every chain
+ * run. The live session's file is always kept.
+ */
+export function pruneOldSessions(config: KnightConfig): void {
+  const keep = new Set<string>();
+  const live = session?.sessionManager.getSessionFile();
+  if (live) keep.add(live);
+  pruneSessionFiles(
+    {
+      maxFiles: config.sessionRetentionMaxFiles,
+      maxAgeMs: config.sessionRetentionDays * 24 * 60 * 60 * 1000,
+    },
+    keep,
+  )
+    .then((removed) => {
+      if (removed.length > 0) log.info("Pruned old session files", { count: removed.length });
+    })
+    .catch((err) => log.warn("Session retention prune failed", { error: String(err) }));
 }
 
 // Serialize prompt() calls — Pi SDK sessions handle one prompt at a time
@@ -240,31 +263,43 @@ export async function executeTask(
   // Start a fresh session when a new chain run begins (#31). This runs inside the
   // serialized region so it can't race a concurrent task's prompt. runId is optional:
   // ad-hoc/mission tasks (and older operators) omit it and keep reusing the session.
-  // Exception: a session that was never prompted and carries no PVC history has no
-  // context to bleed — adopt it (this is what makes startup pre-warming effective;
-  // disposing here would throw away the warmed session on every first chain task).
-  if (runId && runId !== currentRunId && session) {
-    if (!sessionUsed && session.getSessionStats().totalMessages === 0) {
-      log.info("Adopting pre-warmed unused session for new chain run", {
-        previousRunId: currentRunId ?? null,
-        runId,
-      });
-    } else {
-      log.info("New chain run — resetting agent session to avoid context bleed", {
-        previousRunId: currentRunId ?? null,
-        runId,
-      });
-      try {
-        session.dispose();
-      } catch (err) {
-        log.warn("Failed to dispose prior session on run change", { error: String(err) });
-      }
-      session = null;
+  // A pristine session (never prompted, no PVC history) has no context to bleed and is
+  // adopted instead — this is what keeps startup pre-warming effective.
+  const action = decideRunSession({
+    runId,
+    currentRunId,
+    hasSession: session !== null,
+    sessionPristine: session !== null && !sessionUsed && session.getSessionStats().totalMessages === 0,
+  });
+  if (action === "adopt") {
+    log.info("Adopting pre-warmed unused session for new chain run", {
+      previousRunId: currentRunId ?? null,
+      runId,
+    });
+  } else if (action === "reset" && session) {
+    log.info("New chain run — starting a fresh agent session to avoid context bleed", {
+      previousRunId: currentRunId ?? null,
+      runId,
+    });
+    try {
+      session.dispose();
+    } catch (err) {
+      log.warn("Failed to dispose prior session on run change", { error: String(err) });
     }
+    session = null;
   }
   if (runId) currentRunId = runId;
 
-  const sess = await getSession(config);
+  let sess: AgentSession;
+  try {
+    sess = await getSession(config);
+  } catch (err) {
+    // Session creation failed (more likely now that each run creates one): release the
+    // prompt lock or every later task would wait on it forever.
+    releaseLock!();
+    throw err;
+  }
+  if (action === "reset") pruneOldSessions(config);
 
   // Snapshot stats before this task
   const statsBefore = sess.getSessionStats();

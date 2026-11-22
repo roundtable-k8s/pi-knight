@@ -3,7 +3,7 @@ import { initLogger, log } from "./logger.js";
 import { connectNats, subscribe, publishResult, drain } from "./nats.js";
 import { startHealthServer, stopHealthServer, setSkillCount, setActiveTaskCount, setDegradedReason } from "./health.js";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
-import { executeTask, getActiveSession, warmSession } from "./knight.js";
+import { executeTask, getActiveSession, pruneOldSessions, warmSession } from "./knight.js";
 import { startIntrospect } from "./introspect.js";
 import { resolveModel } from "./model.js";
 import { preflightModelUntilReady } from "./preflight.js";
@@ -69,6 +69,8 @@ async function main(): Promise<void> {
   // snapshot includes them, before task subscribe so cold-start latency —
   // observed 79s with PVC history — lands here, not in the first task's window).
   warmSession(config);
+  // Apply session-file retention once at startup; it runs again on every run change.
+  pruneOldSessions(config);
 
   // Connect to NATS
   await connectNats(config);
@@ -131,6 +133,7 @@ async function main(): Promise<void> {
         knight: config.knightName,
         success: false,
         result: `Task failed: ${errMsg}`,
+        error: errMsg,
         duration_ms: durationMs,
         cost: 0,
         tokens: { input: 0, output: 0 },

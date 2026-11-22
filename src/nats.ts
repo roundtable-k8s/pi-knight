@@ -40,6 +40,39 @@ export function normalizeTimeoutMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+/** Accept only a non-empty string run id; anything else means "no run identity". */
+function normalizeRunId(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * Parse a raw task message. The operator sends TaskPayload JSON
+ * (`taskId`, `chainName`, `stepName`, `runId`, `task`); other dispatchers use
+ * snake_case variants. Non-JSON payloads are treated as plain task text.
+ */
+export function parseTaskPayload(raw: string, subjectTaskId: string): ParsedTask {
+  try {
+    const json = JSON.parse(raw);
+    if (json === null || typeof json !== "object") throw new Error("not an object");
+    return {
+      task: json.task ?? json.description ?? json.message ?? raw,
+      taskId: json.task_id ?? json.taskId ?? subjectTaskId,
+      domain: json.domain,
+      from: json.from ?? json.payload?.from,
+      dispatchedBy: json.dispatched_by ?? json.dispatchedBy,
+      timestamp: json.timestamp,
+      // Only honor a positive, finite timeout. A non-positive value (some dispatchers
+      // marshal an omitted int field as 0) would otherwise abort the task on the next
+      // tick; normalize it to undefined so the knight's configured timeout applies. (#30)
+      timeoutMs: normalizeTimeoutMs(json.metadata?.timeout_ms ?? json.metadata?.timeoutMs),
+      runId: normalizeRunId(json.runId ?? json.run_id),
+    };
+  } catch {
+    // Not JSON (or not an object) — treat entire payload as task text
+    return { task: raw, taskId: subjectTaskId };
+  }
+}
+
 let nc: NatsConnection | null = null;
 let js: JetStreamClient | null = null;
 let consumer: ConsumerMessages | null = null;
@@ -162,29 +195,7 @@ function buildTaskIterable(msgs: ConsumerMessages): AsyncIterable<ParsedTask> {
         const subjectParts = subject.split(".");
         const subjectTaskId = subjectParts[subjectParts.length - 1] ?? "unknown";
 
-        let parsed: ParsedTask;
-        try {
-          const json = JSON.parse(raw);
-          parsed = {
-            task: json.task ?? json.description ?? json.message ?? raw,
-            taskId: json.task_id ?? json.taskId ?? subjectTaskId,
-            domain: json.domain,
-            from: json.from ?? json.payload?.from,
-            dispatchedBy: json.dispatched_by ?? json.dispatchedBy,
-            timestamp: json.timestamp,
-            // Only honor a positive, finite timeout. A non-positive value (some dispatchers
-            // marshal an omitted int field as 0) would otherwise abort the task on the next
-            // tick; normalize it to undefined so the knight's configured timeout applies. (#30)
-            timeoutMs: normalizeTimeoutMs(json.metadata?.timeout_ms ?? json.metadata?.timeoutMs),
-            runId: json.runId ?? json.run_id,
-          };
-        } catch {
-          // Not JSON — treat entire payload as task text
-          parsed = {
-            task: raw,
-            taskId: subjectTaskId,
-          };
-        }
+        const parsed = parseTaskPayload(raw, subjectTaskId);
 
         // Reject empty/missing task text — don't waste an LLM call on nothing
         if (!parsed.task || parsed.task.trim().length === 0) {
