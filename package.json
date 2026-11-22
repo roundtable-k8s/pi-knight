@@ -13,7 +13,7 @@
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.79.1",
     "@earendil-works/pi-ai": "^0.79.1",
-    "@earendil-works/pi-coding-agent": "^0.79.1",
+    "@earendil-works/pi-coding-agent": "^1.6.0",
     "nats": "^2.29.3",
     "prom-client": "^15.1.0",
     "typebox": "1.1.38"
