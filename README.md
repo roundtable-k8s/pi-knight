@@ -13,7 +13,7 @@ Built on the same Pi SDK that powers [OpenClaw](https://github.com/openclaw/open
 ```
 Pi-Knight Pod (Kubernetes)
 ├── pi-knight          → Agent runtime (Pi SDK + NATS + custom tools)
-├── git-sync           → Skill delivery from roundtable-arsenal
+├── git-sync           → Skill delivery from roundtable-k8s/arsenal
 └── chrome (optional)  → Headless browser for research tasks
 ```
 
