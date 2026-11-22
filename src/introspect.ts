@@ -1,8 +1,8 @@
-import { readFile, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { log } from "./logger.js";
 import { getConnection } from "./nats.js";
 import { getActiveSession } from "./knight.js";
+import { listSessionFiles } from "./sessions.js";
 import {
   parseSessionFile,
   recentItemsForEntry,
@@ -25,9 +25,6 @@ interface IntrospectRequest {
 const startTime = Date.now();
 let sub: Subscription | null = null;
 
-// Root of the persisted per-session JSONL files (pi SDK writes under
-// <agentDir>/sessions; knights use agentDir "/data"). Overridable for tests.
-const SESSIONS_ROOT = process.env.KNIGHT_SESSIONS_ROOT ?? "/data/sessions";
 // Cap how many past sessions we list and how many entries we page per request
 // (keeps the NATS reply under the ~1MB payload limit).
 const MAX_HISTORY = 60;
@@ -185,52 +182,8 @@ function buildTree(config: KnightConfig) {
   };
 }
 
-// A persisted session's public id is the uuid embedded in its filename
-// (`<iso-timestamp>_<uuid>.jsonl`). Validate ids to this charset so a request
-// can never escape the sessions dir.
+// Validate ids to the uuid charset so a request can never escape the sessions dir.
 const SESSION_ID_RE = /^[0-9a-fA-F-]+$/;
-
-function sessionIdFromFilename(name: string): string {
-  const stem = name.replace(/\.jsonl$/, "");
-  const us = stem.lastIndexOf("_");
-  return us >= 0 ? stem.slice(us + 1) : stem;
-}
-
-// List every persisted session file under the sessions root (one subdir per
-// cwd), newest first by mtime. Returns [] if the dir doesn't exist yet.
-async function listSessionFiles(): Promise<Array<{ id: string; path: string; sizeBytes: number; mtimeMs: number }>> {
-  let dirents;
-  try {
-    dirents = await readdir(SESSIONS_ROOT, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const dirs = dirents.filter((d) => d.isDirectory()).map((d) => join(SESSIONS_ROOT, d.name));
-  // Defensive: also consider .jsonl files sitting directly in the root.
-  if (dirents.some((d) => d.isFile() && d.name.endsWith(".jsonl"))) dirs.push(SESSIONS_ROOT);
-
-  const files: Array<{ id: string; path: string; sizeBytes: number; mtimeMs: number }> = [];
-  for (const dir of dirs) {
-    let names;
-    try {
-      names = await readdir(dir);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      if (!name.endsWith(".jsonl")) continue;
-      const path = join(dir, name);
-      try {
-        const st = await stat(path);
-        files.push({ id: sessionIdFromFilename(name), path, sizeBytes: st.size, mtimeMs: st.mtimeMs });
-      } catch {
-        // file vanished between readdir and stat — skip
-      }
-    }
-  }
-  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return files;
-}
 
 async function buildHistory(config: KnightConfig) {
   const files = await listSessionFiles();

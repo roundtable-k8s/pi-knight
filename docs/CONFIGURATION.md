@@ -59,6 +59,18 @@ Knights can evolve their own files over time — ConfigMap seeds the initial sta
 | `TASK_TIMEOUT_MS` | Default task timeout (ms) | `1800000` (30 min) |
 | `MAX_CONCURRENT_TASKS` | Max parallel task execution | `2` |
 
+### Sessions
+Each chain run gets its own agent session: tasks carrying the operator's `runId`
+(`TaskPayload.RunID`) share one session per run, and a new `runId` starts a fresh
+session so context never bleeds between runs. Tasks without a `runId` (ad-hoc,
+missions) keep reusing the current session. Every session is persisted as a JSONL
+file under `/data/sessions`; old files are pruned at startup and on each run change.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SESSION_RETENTION_MAX_FILES` | Max persisted session files kept on the PVC (`0` = no cap) | `100` |
+| `SESSION_RETENTION_DAYS` | Delete session files not modified for this many days (`0` = no cap) | `30` |
+
 ### Observability
 | Variable | Description | Default |
 |----------|-------------|---------|
