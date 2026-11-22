@@ -4,7 +4,7 @@
 
 ## Principle
 
-Every knight runs the **same Docker image**. Identity, personality, capabilities, and model selection are injected via Kubernetes ConfigMaps, Secrets, and environment variables. Skill filtering is managed at the Helm/git-sync layer — the runtime loads all skills from mounted paths.
+Every knight runs the **same Docker image**. Identity, personality, capabilities, and model selection are injected via Kubernetes ConfigMaps, Secrets, and environment variables. Skill filtering is managed by the operator's sidecars (git-sync + skill-filter) — the runtime loads all skills from mounted paths.
 
 ## Configuration Layers
 
@@ -28,7 +28,7 @@ Every knight runs the **same Docker image**. Identity, personality, capabilities
 Pi SDK's `DefaultResourceLoader` handles this natively:
 - `cwd=/data` — project-local discovery (PVC workspace)
 - `agentDir=/config` — global config (ConfigMap personality files, AGENTS.md)
-- `additionalSkillPaths=["/skills"]` — arsenal repo via git-sync
+- `additionalSkillPaths=["/skills"]` — merged arsenal skills built by the skill-filter sidecar
 
 Knights can evolve their own files over time — ConfigMap seeds the initial state, the knight's own modifications on PVC take priority.
 
@@ -69,9 +69,11 @@ Knights can evolve their own files over time — ConfigMap seeds the initial sta
 
 Skill filtering is managed at the **deployment layer**, not in pi-knight code:
 
-- **git-sync** mounts the arsenal repo to `/skills`
-- **Helm values** control which skill directories are synced per knight
+- **git-sync** sidecars (one per arsenal in `spec.arsenal` + `spec.arsenals`) sync each repo to `/arsenal/<name>`
+- **skill-filter** links the categories in the Knight's `spec.skills` into `/skills/<category>/<skill>`; when several arsenals provide the same skill, the last one wins
 - Pi SDK's `loadSkills()` loads everything from `/skills` — no runtime filtering
+
+See [Skills](SKILLS.md#arsenal-delivery) for the layout and an example.
 
 This keeps the runtime simple and lets GitOps control what each knight can do.
 

@@ -13,12 +13,13 @@ Built on the same Pi SDK that powers [OpenClaw](https://github.com/openclaw/open
 ```
 Pi-Knight Pod (Kubernetes)
 ├── pi-knight          → Agent runtime (Pi SDK + NATS + custom tools)
-├── git-sync           → Skill delivery from roundtable-k8s/arsenal
+├── git-sync[-<name>]  → One per arsenal repo (spec.arsenal + spec.arsenals) → /arsenal/<name>
+├── skill-filter       → Merges the arsenals into /skills/<category>/<skill> for spec.skills
 └── chrome (optional)  → Headless browser for research tasks
 ```
 
 **Communication:** NATS JetStream (async, durable, auditable)  
-**Skills:** agentskills.io format, filtered per knight via `KNIGHT_SKILLS`  
+**Skills:** agentskills.io format, filtered per knight by category (`spec.skills`) in the operator's skill-filter sidecar  
 **Models:** Any LLM via `pi-ai` — Claude, GPT, Gemini, Ollama, etc.  
 **Observability:** Structured JSON logs, Prometheus metrics, cost tracking
 

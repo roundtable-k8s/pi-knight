@@ -56,7 +56,7 @@ securityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
-  readOnlyRootFilesystem: true  # Writable: /data, /tmp, /skills
+  readOnlyRootFilesystem: true  # Writable: /data, /tmp
   allowPrivilegeEscalation: false
   capabilities:
     drop: [ALL]
@@ -65,7 +65,7 @@ securityContext:
 ## Layer 2: Container Security
 
 - **Non-root execution** — UID 1000, no sudo
-- **Read-only root filesystem** — Only `/data` (PVC), `/tmp`, and `/skills` (emptyDir) are writable
+- **Read-only root filesystem** — Only `/data` (PVC) and `/tmp` are writable; `/arsenal` and `/skills` (emptyDirs written by the git-sync/skill-filter sidecars) are mounted read-only in the pi-knight container
 - **No service account token** — `automountServiceAccountToken: false` (unless knight needs K8s API)
 - **Resource limits** — Memory requests for scheduling, no hard limits (homelab pattern)
 - **Image pinned to SHA** — No `:latest` tag, deterministic deployments
@@ -78,7 +78,7 @@ Pi-Knight restricts what the agent's built-in tools can do:
 | Path | Permission | Notes |
 |------|-----------|-------|
 | `/data/*` | Read/Write | Knight's workspace (PVC) |
-| `/skills/*` | Read-only | Arsenal skills (git-sync) |
+| `/skills/*` | Read-only | Merged arsenal skills (skill-filter symlinks into `/arsenal/<name>`) |
 | `/vault/*` | Read-only | Shared Obsidian vault |
 | `/vault/Briefings/*` | Read/Write | Briefing output |
 | `/vault/Roundtable/*` | Read/Write | Inter-knight notes |
@@ -103,8 +103,8 @@ function canWriteVault(path: string, knight: string): boolean {
 
 ## Layer 4: Capability Scoping
 
-### KNIGHT_SKILLS
-Each knight only loads skills for its domain. Galahad can't use finance tools. Percival can't run security scans.
+### Skill Categories (`spec.skills` / KNIGHT_SKILLS)
+Each knight only loads skills for its domain: the skill-filter sidecar links only the categories in the Knight's `spec.skills` into `/skills`. Galahad can't use finance tools. Percival can't run security scans.
 
 ### Per-Knight API Keys
 Each knight gets only the API keys it needs via ExternalSecret:

@@ -10,7 +10,7 @@ This is the same skill system that powers OpenClaw — no custom walker needed.
 1. **Discovery**: `loadSkills()` from `@earendil-works/pi-coding-agent` recursively scans skill directories
 2. **Parsing**: Reads SKILL.md files with YAML frontmatter (name, description)
 3. **Prompt Injection**: `formatSkillsForPrompt()` generates XML `<available_skills>` block per [agentskills.io spec](https://agentskills.io/integrate-skills)
-4. **Deduplication**: Resolves symlinks via `realpathSync` to avoid loading duplicates from git-sync worktrees
+4. **Deduplication**: Canonicalizes each SKILL.md path (resolving symlinks) so a skill reached via two paths loads once; distinct skills with the same `name` are first-wins, reported as a collision diagnostic
 5. **Validation**: Checks skill names (lowercase, hyphens only, ≤64 chars) and descriptions (required, ≤1024 chars)
 
 ## Skill Sources
@@ -21,37 +21,74 @@ Pi SDK loads skills from multiple locations (first-write-wins on name collisions
 |--------|------|-------------|
 | User skills | `/config/skills/` | From ConfigMap (agentDir) |
 | Project skills | `/data/.pi/skills/` | From PVC workspace |
-| Additional paths | `/skills/` | Arsenal repo via git-sync |
+| Additional paths | `/skills/` | Merged arsenal skills (git-sync + skill-filter sidecars) |
 
-## Git-Sync Integration
+## Arsenal Delivery
 
-The [arsenal repo](https://github.com/roundtable-k8s/arsenal) is mounted at `/skills/` via git-sync sidecar:
+Skills come from one or more **arsenal** git repos, delivered by sidecars the
+[roundtable operator](https://github.com/roundtable-k8s/roundtable) adds to the pod.
+A Knight has `spec.arsenal` (default repo
+[`roundtable-k8s/arsenal`](https://github.com/roundtable-k8s/arsenal)) plus optional
+`spec.arsenals`, merged in order: `arsenal` first, then each `arsenals` entry.
+
+```yaml
+apiVersion: ai.roundtable.io/v1alpha1
+kind: Knight
+metadata:
+  name: galahad
+spec:
+  skills: [shared, security]           # categories linked into /skills
+  arsenal:
+    repo: https://github.com/roundtable-k8s/arsenal   # name defaults to "arsenal"
+  arsenals:
+    - name: private                    # defaults to the repo basename
+      repo: https://github.com/example/private-arsenal
+      ref: main
+      period: 300s
+```
+
+### git-sync sidecars
+
+One git-sync sidecar per arsenal: `git-sync` for `spec.arsenal`, `git-sync-<name>` for
+each `spec.arsenals` entry. Each syncs into its own root `/arsenal/.sync/<name>` and
+exposes the current tree at `/arsenal/<name>`. The `arsenal` volume is mounted at
+`/arsenal` (read-only in the pi-knight container), not `/skills`.
+
+### skill-filter sidecar
+
+The `skill-filter` sidecar builds `/skills/<category>/<skill>` symlinks for the
+categories in `spec.skills`. Merging is **per skill**: the last arsenal that provides
+`<category>/<skill>` wins, so `arsenals` entries override `arsenal`. `/skills/<category>`
+is a real directory (older layouts symlinked the whole category). It re-runs every
+60s, relinking changed skills and pruning skills removed upstream.
 
 ```
-/skills/
-├── roundtable-arsenal -> .worktrees/<sha>/   # symlink to current checkout
-├── .worktrees/
-│   └── <sha>/
-│       ├── security/
-│       │   ├── opencti-intel/SKILL.md
-│       │   └── shodan-recon/SKILL.md
-│       ├── shared/
-│       │   ├── nats-comms/SKILL.md
-│       │   └── web-search/SKILL.md
-│       └── ...
+/arsenal/
+├── .sync/                      # git-sync roots (one per arsenal)
+├── arsenal -> .sync/arsenal/…  # current tree of spec.arsenal
+└── private -> .sync/private/…  # current tree of spec.arsenals[name=private]
+
+/skills/                        # built by skill-filter, read-only to pi-knight
+├── security/
+│   ├── opencti-intel -> /arsenal/arsenal/security/opencti-intel
+│   └── shodan-recon  -> /arsenal/private/security/shodan-recon   # overridden
+└── shared/
+    ├── nats-comms    -> /arsenal/arsenal/shared/nats-comms
+    └── web-search    -> /arsenal/arsenal/shared/web-search
 ```
 
-Pi SDK handles symlink resolution and `.gitignore` respecting natively.
+pi-knight loads everything under `/skills` (`skillPaths` / `additionalSkillPaths: ["/skills"]`);
+the Pi SDK loader follows the symlinked skill dirs and respects `.gitignore`.
 
 ## Startup Race Condition
 
-Git-sync may not have completed its first pull when pi-knight starts.
-The startup code retries skill loading up to 6 times with 3s delays.
+git-sync and skill-filter may not have finished their first pass when pi-knight starts.
+The startup code retries skill loading up to 20 times with 3s delays (~60s).
 
 ## Skill Reload
 
 Pi SDK supports skill reload via `AgentSession.reload()` which re-discovers all skills,
-rebuilds the system prompt, and picks up any changes from git-sync.
+rebuilds the system prompt, and picks up any changes the sidecars have linked into `/skills`.
 This is triggered by the `/reload` slash command in interactive mode.
 
 For headless knight operation, skills are loaded fresh per task (each task creates a new session).
@@ -82,9 +119,10 @@ description: "Query OpenCTI threat intelligence platform for STIX objects, indic
 
 ## Category Filtering
 
-Note: Pi SDK's `loadSkills()` does not natively filter by category.
-All skills in the provided paths are loaded. The `KNIGHT_SKILLS` env var is retained
-for logging/metadata purposes but does not affect discovery.
+Category filtering happens in the **skill-filter sidecar**, not in pi-knight:
+only the categories listed in the Knight's `spec.skills` are linked into `/skills`,
+and Pi SDK's `loadSkills()` then loads everything it finds there. The operator also
+exposes the list as `KNIGHT_SKILLS` in the knight's ConfigMap; the runtime does not
+read it.
 
-Knights receive all shared + domain skills. The agent's system prompt and personality
-(SOUL.md) guide it to stay within its domain.
+The agent's system prompt and personality (SOUL.md) guide it to stay within its domain.
