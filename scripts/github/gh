@@ -1,0 +1,47 @@
+#!/bin/sh
+# gh shim for Round Table knights.
+#
+# Installed ahead of the real gh on PATH. When $GITHUB_TOKEN_FILE is set it
+# exports GH_TOKEN from that file on every invocation, so a token the kubelet
+# rotated in place is used without restarting the pod (env vars are frozen at
+# pod start; GitHub App tokens expire after an hour). Without
+# GITHUB_TOKEN_FILE it is a transparent pass-through. It never logs the token.
+set -u
+set -f
+
+self=$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")
+
+# Find the next gh on PATH that is not this shim.
+real=""
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+  [ -n "$dir" ] || continue
+  candidate=$dir/gh
+  [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+  resolved=$(readlink -f -- "$candidate" 2>/dev/null || printf '%s' "$candidate")
+  [ "$resolved" = "$self" ] && continue
+  real=$candidate
+  break
+done
+IFS=$old_ifs
+
+if [ -z "$real" ]; then
+  echo "gh: command not found (no gh on PATH besides the Round Table shim)" >&2
+  exit 127
+fi
+
+if [ -n "${GITHUB_TOKEN_FILE:-}" ]; then
+  if [ -r "$GITHUB_TOKEN_FILE" ]; then
+    token=$(tr -d '\r\n' < "$GITHUB_TOKEN_FILE" 2>/dev/null || true)
+    if [ -n "$token" ]; then
+      GH_TOKEN=$token
+      export GH_TOKEN
+    fi
+    unset token
+  else
+    echo "gh shim: GITHUB_TOKEN_FILE is not readable, using environment credentials" >&2
+  fi
+fi
+
+exec "$real" "$@"
