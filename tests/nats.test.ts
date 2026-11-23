@@ -52,3 +52,10 @@ test("parseTaskPayload treats non-JSON and non-object JSON as plain task text", 
   assert.deepEqual(parseTaskPayload("null", "sub"), { task: "null", taskId: "sub" });
   assert.deepEqual(parseTaskPayload('"quoted"', "sub"), { task: '"quoted"', taskId: "sub" });
 });
+
+test("parseTaskPayload reads an optional per-task model", () => {
+  assert.equal(parseTaskPayload(JSON.stringify({ task: "x", model: " openrouter/anthropic/claude-sonnet-4.5:floor " }), "s").model, "openrouter/anthropic/claude-sonnet-4.5:floor");
+  assert.equal(parseTaskPayload(JSON.stringify({ task: "x", model: "" }), "s").model, undefined);
+  assert.equal(parseTaskPayload(JSON.stringify({ task: "x", model: 5 }), "s").model, undefined);
+  assert.equal(parseTaskPayload(JSON.stringify({ task: "x" }), "s").model, undefined);
+});

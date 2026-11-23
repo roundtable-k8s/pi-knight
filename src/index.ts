@@ -84,11 +84,11 @@ async function main(): Promise<void> {
 
   // Task execution state
   let activeCount = 0;
-  const taskQueue: Array<{ task: string; taskId: string; timeoutMs?: number; runId?: string }> = [];
+  const taskQueue: Array<{ task: string; taskId: string; timeoutMs?: number; runId?: string; model?: string }> = [];
   let shuttingDown = false;
 
   // Process a single task
-  async function processTask(taskText: string, taskId: string, timeoutMs: number, runId?: string): Promise<void> {
+  async function processTask(taskText: string, taskId: string, timeoutMs: number, runId?: string, model?: string): Promise<void> {
     activeCount++;
     setActiveTaskCount(activeCount);
     metrics.activeTasks.labels(config.knightName).set(activeCount);
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const result = await executeTask(taskText, config, controller.signal, runId);
+      const result = await executeTask(taskText, config, controller.signal, runId, { model });
       const durationMs = Date.now() - startTime;
 
       await publishResult(taskId, {
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
 
       if (taskQueue.length > 0 && activeCount < config.maxConcurrentTasks) {
         const next = taskQueue.shift()!;
-        processTask(next.task, next.taskId, next.timeoutMs ?? config.taskTimeoutMs, next.runId);
+        processTask(next.task, next.taskId, next.timeoutMs ?? config.taskTimeoutMs, next.runId, next.model);
       }
     }
   }
@@ -171,9 +171,9 @@ async function main(): Promise<void> {
 
       if (activeCount >= config.maxConcurrentTasks) {
         log.info("At capacity, queuing task", { taskId: parsed.taskId, queueSize: taskQueue.length + 1 });
-        taskQueue.push({ task: parsed.task, taskId: parsed.taskId, timeoutMs, runId: parsed.runId });
+        taskQueue.push({ task: parsed.task, taskId: parsed.taskId, timeoutMs, runId: parsed.runId, model: parsed.model });
       } else {
-        processTask(parsed.task, parsed.taskId, timeoutMs, parsed.runId);
+        processTask(parsed.task, parsed.taskId, timeoutMs, parsed.runId, parsed.model);
       }
     }
   })();

@@ -100,8 +100,15 @@ export function splitRoutingSuffix(modelName: string): { base: string; suffix?: 
  * Falls back to a hand-built openai-completions model for env-driven local endpoints
  * (LiteLLM/Ollama) with no models.json entry. When no auth is configured anywhere, a
  * dummy runtime key is set so the SDK reaches keyless local endpoints instead of bailing.
+ *
+ * With `strict`, a model missing from the catalog/models.json throws instead of falling
+ * back to that local endpoint — used for per-task overrides, where a typo must be a task
+ * error rather than a silent request to the wrong endpoint.
  */
-export async function resolveModel(modelStr: string): Promise<ResolvedModel> {
+export async function resolveModel(
+  modelStr: string,
+  opts: { strict?: boolean } = {},
+): Promise<ResolvedModel> {
   const { provider, modelName } = parseModelStr(modelStr);
   // Strip any routing-variant suffix for the catalog lookup; the full slug
   // (with suffix) is still what we send to the API via model.id below.
@@ -126,6 +133,10 @@ export async function resolveModel(modelStr: string): Promise<ResolvedModel> {
   if (model && routingSuffix) {
     log.info("Applying routing suffix to resolved model", { model: lookupName, suffix: routingSuffix });
     model = { ...model, id: modelName } as Model<Api>;
+  }
+
+  if (!model && opts.strict) {
+    throw new Error(`Unknown model "${modelStr}": not in the model catalog or models.json`);
   }
 
   if (!model) {
