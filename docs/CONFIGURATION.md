@@ -153,6 +153,24 @@ spec:
           regexp: "^ANTHROPIC_.*"
 ```
 
+### GitHub credentials
+
+GitHub App installation tokens expire after an hour, but env vars are frozen at
+pod start. When the Knight (or its RoundTable) sets `spec.github.tokenSecretRef`,
+the operator mounts that Secret read-only and sets
+`GITHUB_TOKEN_FILE=/var/run/secrets/roundtable/github/token`. The kubelet
+rewrites the file when the Secret rotates. With it set, the entrypoint:
+
+- configures git to use `/usr/local/bin/git-credential-roundtable`, which reads
+  the file on every call and answers `username=x-access-token` for
+  `https://github.com`
+- puts `/opt/roundtable/bin` first on `PATH`, where a `gh` shim exports
+  `GH_TOKEN` from the file per invocation and then execs the real `gh`
+
+Neither script logs the token. Without `GITHUB_TOKEN_FILE` the old behaviour is
+kept: `gh auth git-credential` as the git helper when `gh` is installed, else a
+static store written from `GH_TOKEN`.
+
 ## Model Selection Strategy
 
 **Cheap by default, upgrade per knight.** The whole fleet runs the default

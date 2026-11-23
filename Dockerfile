@@ -44,6 +44,11 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 COPY defaults/ ./defaults/
 COPY scripts/ ./scripts/
+# GitHub token-file support (roundtable-k8s/roundtable#194): a git credential
+# helper and a gh shim that read $GITHUB_TOKEN_FILE on every call. The
+# entrypoint puts /opt/roundtable/bin first on PATH when that file is set.
+RUN install -D -m 0755 scripts/github/git-credential-roundtable /usr/local/bin/git-credential-roundtable \
+    && install -D -m 0755 scripts/github/gh /opt/roundtable/bin/gh
 
 # ── Runtime ───────────────────────────────────────────────────────
 ENV NODE_ENV=production \
