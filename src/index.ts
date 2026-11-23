@@ -8,6 +8,7 @@ import { startIntrospect } from "./introspect.js";
 import { resolveModel } from "./model.js";
 import { preflightModelUntilReady } from "./preflight.js";
 import * as metrics from "./metrics.js";
+import { bashGuardrailsEnabled } from "./hooks.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -18,6 +19,8 @@ async function main(): Promise<void> {
     topics: config.subscribeTopics,
     thinking: config.thinkingLevel,
   });
+
+  if (!bashGuardrailsEnabled()) log.warn("Bash guardrails disabled by KNIGHT_BASH_GUARDRAILS=off");
 
   // Start health/metrics HTTP server
   startHealthServer(config);

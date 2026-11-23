@@ -54,6 +54,11 @@ Knights can evolve their own files over time — ConfigMap seeds the initial sta
 
 A task payload may carry an optional `model` (`provider/model`, routing suffixes such as `:floor` allowed). It is resolved through the ModelRuntime and used for that task only (the session switches model, then the knight default is restored); the result reports the model used. A model missing from the catalog/`models.json` fails the task instead of falling back.
 
+### Safety
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `KNIGHT_BASH_GUARDRAILS` | `off` disables the dangerous-bash blocklist (recursive delete at `/`, force push, piping a download into a shell, device writes, mkfs). Meant for trusted autonomous coding knights; logs a warning at startup. Any value other than `off` keeps it on. The secret-write guard and secret redaction always stay on. | `on` |
+
 ### NATS Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|

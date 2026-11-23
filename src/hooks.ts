@@ -36,6 +36,15 @@ const SECRET_PATTERNS: RegExp[] = [
 
 // ─── Pure helpers ──────────────────────────────────────────────────
 
+/**
+ * KNIGHT_BASH_GUARDRAILS: "on" (default) enables the bash blocklist, "off" disables it.
+ * Any other value keeps it on, so a typo never silently drops the guardrail.
+ * The secret-write guard is not affected by this switch.
+ */
+export function bashGuardrailsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env["KNIGHT_BASH_GUARDRAILS"] ?? "on").trim().toLowerCase() !== "off";
+}
+
 /** Reason a bash command must be blocked, or undefined when it is allowed. */
 export function findBlockedBashReason(command: string): string | undefined {
   return BLOCKED_BASH_PATTERNS.find(({ pattern }) => pattern.test(command))?.reason;
@@ -78,7 +87,7 @@ export const toolHooksExtension: ExtensionFactory = (pi) => {
       argsPreview: truncateArgs(event.input),
     });
 
-    if (isToolCallEventType("bash", event)) {
+    if (isToolCallEventType("bash", event) && bashGuardrailsEnabled()) {
       const command = event.input.command ?? "";
       const reason = findBlockedBashReason(command);
       if (reason) {
