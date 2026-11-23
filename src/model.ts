@@ -2,14 +2,14 @@
  * Shared model + auth resolution for knight and sub-agent sessions.
  *
  * One place resolves a "provider/model" string into a usable Model plus the
- * AuthStorage/ModelRegistry to pass to createAgentSession — so the knight and
+ * ModelRuntime to pass to createAgentSession — so the knight and
  * its sub-agents never drift apart on model selection or auth handling.
  */
-import { getModel, type Api, type Model } from "@earendil-works/pi-ai";
-import { AuthStorage, ModelRegistry, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { InMemoryCredentialStore, InMemoryModelsStore, type Api, type Model } from "@earendil-works/pi-ai";
+import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { log } from "./logger.js";
 
-// Custom-model catalog read by the SDK ModelRegistry. Defaults to the workspace PVC;
+// Custom-model catalog read by the SDK ModelRuntime. Defaults to the workspace PVC;
 // override (e.g. to a read-only ConfigMap mount like /config/models.json) via env so a
 // fleet can ship a declarative local-model catalog instead of the per-knight env triplet.
 const MODELS_JSON = process.env.MODELS_JSON_PATH || "/data/models.json";
@@ -30,24 +30,20 @@ export interface ResolvedModel {
   model: Model<Api>;
   provider: string;
   modelName: string;
-  authStorage: AuthStorage;
-  modelRegistry: ModelRegistry;
+  modelRuntime: ModelRuntime;
 }
 
 /**
  * Build a SettingsManager that explicitly trusts the knight's project directory.
  *
- * pi 0.79 added "project trust" gating: project-local settings, resources, instructions,
- * and context files load only when the project is trusted. The low-level createAgentSession
- * path we use defaults projectTrusted=true — the ask/never resolution lives in the CLI
- * app/mode layer (main/print/json/rpc) that we bypass — so knights still load resources
- * today. We set projectTrusted explicitly anyway so our trust posture is stated in code and
- * survives a future SDK default flip. Knights run fully autonomous on their own PVC, so
- * "trusted" is the intended posture.
+ * pi gates project-local settings, resources, instructions and context files on project
+ * trust. The ask/never resolution lives in the CLI app/mode layer we bypass, so we state
+ * the posture explicitly: knights run fully autonomous on their own PVC, so "trusted" is
+ * the intended posture.
  *
  * We use the create-time `projectTrusted` option (a write-free read of the settings dir) and
  * deliberately NOT setDefaultProjectTrust(), which persists to /data on every call — the
- * runtime avoids /data writes for SIGKILL lock safety (cf. in-memory AuthStorage below), and
+ * runtime avoids /data writes for SIGKILL lock safety (cf. in-memory credential store below), and
  * `defaultProjectTrust` is only consulted by the CLI app layer we don't run.
  */
 export function createTrustedSettingsManager(cwd: string, agentDir: string): SettingsManager {
@@ -96,32 +92,33 @@ export function splitRoutingSuffix(modelName: string): { base: string; suffix?: 
 /**
  * Resolve a model + auth for a "provider/model" string.
  *
- * In-memory AuthStorage avoids /data/auth.json lock deadlocks on SIGKILL. The
- * ModelRegistry reads /data/models.json (custom providers/models) and resolves API
- * keys via the correct per-provider env vars (e.g. GEMINI_API_KEY for google,
- * ANTHROPIC_OAUTH_TOKEN/ANTHROPIC_API_KEY for anthropic), auth.json, and OAuth.
+ * An in-memory credential store (and in-memory models store) avoids /data/auth.json and
+ * models-store.json lock deadlocks/writes on SIGKILL. The ModelRuntime reads models.json
+ * (custom providers/models) and resolves API keys via the correct per-provider env vars
+ * (e.g. GEMINI_API_KEY for google, ANTHROPIC_OAUTH_TOKEN/ANTHROPIC_API_KEY for anthropic).
  *
  * Falls back to a hand-built openai-completions model for env-driven local endpoints
  * (LiteLLM/Ollama) with no models.json entry. When no auth is configured anywhere, a
  * dummy runtime key is set so the SDK reaches keyless local endpoints instead of bailing.
  */
-export function resolveModel(modelStr: string): ResolvedModel {
+export async function resolveModel(modelStr: string): Promise<ResolvedModel> {
   const { provider, modelName } = parseModelStr(modelStr);
   // Strip any routing-variant suffix for the catalog lookup; the full slug
   // (with suffix) is still what we send to the API via model.id below.
   const { base: lookupName, suffix: routingSuffix } = splitRoutingSuffix(modelName);
 
-  const authStorage = AuthStorage.inMemory();
-  const modelRegistry = ModelRegistry.create(authStorage, MODELS_JSON);
-  const registryError = modelRegistry.getError();
-  if (registryError) {
-    log.warn("models.json failed to load; using built-in models only", { error: registryError });
+  const modelRuntime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: MODELS_JSON,
+    modelsStore: new InMemoryModelsStore(),
+  });
+  const runtimeError = modelRuntime.getError();
+  if (runtimeError) {
+    log.warn("models.json failed to load; using built-in models only", { error: runtimeError });
   }
 
-  // Registry first (built-in + custom models.json); getModel is a redundant built-in fallback.
-  let model = (modelRegistry.find(provider, lookupName) ?? getModel(provider as any, lookupName as any)) as
-    | Model<Api>
-    | undefined;
+  // Built-in catalog + custom models.json.
+  let model = modelRuntime.getModel(provider, lookupName);
 
   // Catalog hit on the base slug: clone (the registry returns a shared reference)
   // and restore the routing suffix on the id so OpenRouter applies the variant
@@ -146,32 +143,39 @@ export function resolveModel(modelStr: string): ResolvedModel {
     log.info("Model not in registry, creating custom openai-completions model", {
       provider, model: modelName, baseUrl, contextWindow, maxTokens, reasoning,
     });
-    model = {
-      id: modelName,
-      name: modelName,
-      api: "openai-completions",
-      provider,
+    // Register the endpoint as a provider on the runtime so request auth, headers and
+    // streaming resolve through it like any catalog model.
+    modelRuntime.registerProvider(provider, {
       baseUrl,
-      reasoning,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow,
-      maxTokens,
-      compat: {
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: false,
-        supportsStrictMode: false,
-        supportsStore: false,
-        maxTokensField: "max_tokens",
-      },
-    } as unknown as Model<Api>;
+      api: "openai-completions",
+      models: [
+        {
+          id: modelName,
+          name: modelName,
+          reasoning,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow,
+          maxTokens,
+          compat: {
+            supportsDeveloperRole: false,
+            supportsReasoningEffort: false,
+            supportsStrictMode: false,
+            supportsStore: false,
+            maxTokensField: "max_tokens",
+          },
+        },
+      ],
+    });
+    model = modelRuntime.getModel(provider, modelName);
+    if (!model) throw new Error(`Failed to register custom model ${provider}/${modelName}`);
   }
 
   // Dummy key only when no auth is configured anywhere — hasConfiguredAuth() uses the
-  // registry's correct provider→env-var map, so real keys are never clobbered.
-  if (!modelRegistry.hasConfiguredAuth(model)) {
-    authStorage.setRuntimeApiKey(provider, "ollama");
+  // runtime's correct provider→env-var map, so real keys are never clobbered.
+  if (!modelRuntime.hasConfiguredAuth(model.provider)) {
+    await modelRuntime.setRuntimeApiKey(model.provider, "ollama");
   }
 
-  return { model, provider, modelName, authStorage, modelRegistry };
+  return { model, provider, modelName, modelRuntime };
 }

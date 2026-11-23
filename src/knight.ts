@@ -10,7 +10,7 @@ import { log } from "./logger.js";
 import { natsTools, setKnightName, setNatsPrefix } from "./tools/nats.js";
 import { subagentTools, setParentModel, setParentKnight } from "./tools/subagent.js";
 import { browserTools } from "./tools/browser.js";
-import { setupToolHooks } from "./hooks.js";
+import { toolHooksExtension } from "./hooks.js";
 import { setupCompactionHook, updateSessionNotes } from "./memory.js";
 import { decideRunSession, pruneSessionFiles } from "./sessions.js";
 import { describeSessionFailure, getBestAssistantResult, resolveTaskOutcome, summarizeSessionTail } from "./result-extraction.js";
@@ -109,7 +109,7 @@ async function getSession(config: KnightConfig): Promise<AgentSession> {
 
 async function createSession(config: KnightConfig): Promise<AgentSession> {
   const tStart = Date.now();
-  const { model, provider, modelName, authStorage, modelRegistry } = resolveModel(config.knightModel);
+  const { model, provider, modelName, modelRuntime } = await resolveModel(config.knightModel);
   const resolveModelMs = Date.now() - tStart;
 
   log.info("Creating persistent session", { provider, model: modelName });
@@ -122,30 +122,49 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
 
   const thinkingLevel = (config.thinkingLevel ?? "off") as ThinkingLevel;
 
+  // createAgentSession does not reload a caller-supplied loader: reload() is what discovers
+  // skills and loads the inline tool-hook extension.
+  const settingsManager = createTrustedSettingsManager("/data", "/data");
+  // In-memory overrides (never written to /data): env-driven retry cap and thinking budgets.
+  settingsManager.applyOverrides({
+    retry: { provider: { maxRetryDelayMs: config.maxRetryDelayMs } },
+    ...(thinkingLevel !== "off" && {
+      thinkingBudgets: {
+        low: config.thinkingBudgetLow,
+        medium: config.thinkingBudgetMedium,
+        high: config.thinkingBudgetHigh,
+      },
+    }),
+  });
+  log.info("Retry delay cap configured", { maxRetryDelayMs: config.maxRetryDelayMs });
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: "/data",
+    agentDir: "/data",
+    settingsManager,
+    additionalSkillPaths: ["/skills"],
+    noExtensions: true,
+    noThemes: true,
+    noPromptTemplates: true,
+    extensionFactories: [{ name: "knight-tool-hooks", factory: toolHooksExtension, hidden: true }],
+    systemPrompt: buildKnightPreamble(config),
+  });
+  await resourceLoader.reload();
+
   const tCreate = Date.now();
   const { session: newSession } = await createAgentSession({
     model,
     thinkingLevel,
     cwd: "/data",
     agentDir: "/data",
-    authStorage,
-    modelRegistry,
-    // Explicitly trust the project dir (pi 0.79 project-trust gating); see model.ts.
-    settingsManager: createTrustedSettingsManager("/data", "/data"),
+    modelRuntime,
+    // Explicitly trust the project dir; see model.ts.
+    settingsManager,
     customTools: [
       ...natsTools,
       ...subagentTools,
       ...(process.env.BROWSER_ENABLED === "true" ? browserTools : []),
     ],
-    resourceLoader: new DefaultResourceLoader({
-      cwd: "/data",
-      agentDir: "/data",
-      additionalSkillPaths: ["/skills"],
-      noExtensions: true,
-      noThemes: true,
-      noPromptTemplates: true,
-      systemPrompt: buildKnightPreamble(config),
-    }),
+    resourceLoader,
   });
 
   const createAgentSessionMs = Date.now() - tCreate;
@@ -154,17 +173,6 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
   // `session` — a task arriving mid-pre-warm must never see a session whose
   // hooks aren't installed yet.
 
-  // Set maxRetryDelayMs on the underlying agent
-  newSession.agent.maxRetryDelayMs = config.maxRetryDelayMs;
-  log.info("Retry delay cap configured", { maxRetryDelayMs: config.maxRetryDelayMs });
-
-  // Enable parallel tool execution — agent runs independent tool calls concurrently.
-  // Matches the system prompt instruction to maximise parallel tool calls where possible.
-  newSession.agent.toolExecution = "parallel";
-
-  // Install tool hooks — safety guardrails, observability, metrics
-  setupToolHooks(newSession);
-
   // Install custom compaction hook — knight-specific context preservation
   setupCompactionHook(newSession, config);
 
@@ -172,43 +180,6 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
   // resets the prefix cleanly when context approaches the window). We deliberately do NOT
   // install a transformContext prune: truncating old messages mutates the prompt prefix and
   // busts provider prompt caching, which is the main cost lever for these persistent sessions.
-
-  // thinkingBudgets — set custom token budgets if thinking is enabled
-  if (thinkingLevel !== "off") {
-    newSession.agent.thinkingBudgets = {
-      low: config.thinkingBudgetLow,
-      medium: config.thinkingBudgetMedium,
-      high: config.thinkingBudgetHigh,
-    };
-    log.info("Thinking budgets configured", {
-      level: thinkingLevel,
-      budgets: newSession.agent.thinkingBudgets,
-    });
-  }
-
-  // onPayload observability hook — log model/token metadata for each LLM call.
-  // NOTE: field is `onPayload` (no underscore). The previous `_onPayload` was a no-op.
-  newSession.agent.onPayload = async (payload: unknown, model: any) => {
-    try {
-      const p = payload as any;
-      // Summary log at info level — safe to always emit
-      log.info("LLM request payload", {
-        model: model?.id ?? model?.name ?? "unknown",
-        provider: model?.provider ?? "unknown",
-        messageCount: Array.isArray(p?.messages) ? p.messages.length : undefined,
-        toolCount: Array.isArray(p?.tools) ? p.tools.length : 0,
-        toolNames: Array.isArray(p?.tools) ? p.tools.map((t: any) => t?.function?.name ?? t?.name).filter(Boolean) : [],
-        hasToolChoice: p?.tool_choice !== undefined,
-        maxTokens: p?.max_tokens ?? p?.max_completion_tokens,
-        stream: p?.stream,
-      });
-      // Full payload at debug level for diagnostics
-      log.debug("LLM request payload (full)", { payload: p });
-    } catch (err) {
-      log.warn("onPayload hook threw", { error: String(err) });
-    }
-    return payload; // pass through unmodified
-  };
 
   // Log active tool names at session create time so we can verify custom tools
   // are actually registered with the agent (not just in the tool registry).

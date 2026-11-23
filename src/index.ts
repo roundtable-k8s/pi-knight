@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   // startup probe passes) and retries with capped backoff until the endpoint answers.
   // Resolving here is throwaway (knight.ts re-resolves for the session) but shares the
   // same baseUrl/default logic, so what we probe is exactly what the session will use.
-  await preflightModelUntilReady(resolveModel(config.knightModel).model, {
+  await preflightModelUntilReady((await resolveModel(config.knightModel)).model, {
     onAttemptFailed: (error) => setDegradedReason(`model preflight failed: ${error}`),
   });
   setDegradedReason(null);
@@ -193,7 +193,7 @@ async function main(): Promise<void> {
     }
 
     // Dispose the session to abort any in-flight agent/compaction/retry/bash work
-    // (pi 0.77+ disposal cancels in-flight work) before we tear down NATS.
+    // (disposal cancels in-flight work) before we tear down NATS.
     try {
       getActiveSession()?.dispose();
     } catch (e) {

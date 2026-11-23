@@ -57,7 +57,7 @@ done
 # ──────────────────────────────────────────────────────────────────
 # Allows per-knight native provider configuration (for example Ollama)
 # without baking models.json into the image. Written to /data/models.json —
-# the runtime's agentDir is /data, so that is where ModelRegistry reads it.
+# the runtime's agentDir is /data, so that is where ModelRuntime reads it.
 if [ -n "${PI_MODELS_JSON_B64:-}" ] || [ -n "${PI_MODELS_JSON:-}" ]; then
   mkdir -p /data
   if [ -n "${PI_MODELS_JSON_B64:-}" ]; then

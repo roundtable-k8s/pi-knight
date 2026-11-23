@@ -35,13 +35,13 @@ test("splitRoutingSuffix leaves unknown suffixes intact", () => {
   assert.deepEqual(splitRoutingSuffix("some/model:bogus"), { base: "some/model:bogus" });
 });
 
-test("resolveModel defaults the ollama provider to the local Ollama OpenAI endpoint", () => {
+test("resolveModel defaults the ollama provider to the local Ollama OpenAI endpoint", async () => {
   const prevBase = process.env.OPENAI_BASE_URL;
   const prevApiBase = process.env.OPENAI_API_BASE;
   delete process.env.OPENAI_BASE_URL;
   delete process.env.OPENAI_API_BASE;
   try {
-    const { model, provider, modelName } = resolveModel("ollama/llama3.1");
+    const { model, provider, modelName } = await resolveModel("ollama/llama3.1");
     assert.equal(provider, "ollama");
     assert.equal(modelName, "llama3.1");
     assert.equal(model.baseUrl, "http://localhost:11434/v1");
@@ -51,30 +51,30 @@ test("resolveModel defaults the ollama provider to the local Ollama OpenAI endpo
   }
 });
 
-test("createTrustedSettingsManager returns a project-trusted manager (pi 0.79 trust gating)", () => {
+test("createTrustedSettingsManager returns a project-trusted manager ", () => {
   const sm = createTrustedSettingsManager(process.cwd(), process.cwd());
   assert.equal(sm.isProjectTrusted(), true);
 });
 
-test("resolveModel makes the fallback model's reasoning flag env-overridable", () => {
+test("resolveModel makes the fallback model's reasoning flag env-overridable", async () => {
   const prev = process.env.MODEL_REASONING;
   try {
     delete process.env.MODEL_REASONING;
-    assert.equal(resolveModel("ollama/gpt-oss:20b").model.reasoning, false, "defaults off");
+    assert.equal((await resolveModel("ollama/gpt-oss:20b")).model.reasoning, false, "defaults off");
 
     process.env.MODEL_REASONING = "true";
-    assert.equal(resolveModel("ollama/gpt-oss:20b").model.reasoning, true, "opt-in for reasoning models");
+    assert.equal((await resolveModel("ollama/gpt-oss:20b")).model.reasoning, true, "opt-in for reasoning models");
   } finally {
     if (prev !== undefined) process.env.MODEL_REASONING = prev;
     else delete process.env.MODEL_REASONING;
   }
 });
 
-test("resolveModel honors an explicit OPENAI_BASE_URL over the ollama default", () => {
+test("resolveModel honors an explicit OPENAI_BASE_URL over the ollama default", async () => {
   const prevBase = process.env.OPENAI_BASE_URL;
   process.env.OPENAI_BASE_URL = "http://ollama.ai.svc.cluster.local:11434/v1";
   try {
-    const { model } = resolveModel("ollama/llama3.1");
+    const { model } = await resolveModel("ollama/llama3.1");
     assert.equal(model.baseUrl, "http://ollama.ai.svc.cluster.local:11434/v1");
   } finally {
     if (prevBase !== undefined) process.env.OPENAI_BASE_URL = prevBase;

@@ -226,11 +226,11 @@ At startup, `entrypoint.sh` writes the provided content to:
 /data/models.json
 ```
 
-This is the runtime's `agentDir`, so `ModelRegistry` loads it automatically.
+This is the runtime's `agentDir`, so the pi `ModelRuntime` loads it automatically.
 It is intended for canary deployments such as native Ollama experiments,
 without changing the default fleet path.
 
-> **Note (pi 0.76+):** in `models.json`, `apiKey`/`headers` values are treated as
+> **Note:** in `models.json`, `apiKey`/`headers` values are treated as
 > literals. To read from an environment variable, use explicit syntax —
 > `"apiKey": "$OPENROUTER_API_KEY"` (or `"${OPENROUTER_API_KEY}"`), not the bare
 > variable name.

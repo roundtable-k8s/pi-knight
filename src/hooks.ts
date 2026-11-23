@@ -1,17 +1,12 @@
 /**
  * Tool call hooks for pi-knight — safety, observability, and metrics.
  *
- * Uses pi-agent-core 0.64.0 beforeToolCall/afterToolCall API to intercept
- * tool executions for logging, blocking dangerous operations, and sanitizing
- * results before they enter the agent's context window.
+ * Implemented as an inline pi extension (`tool_call`, `tool_result` and
+ * `tool_execution_end` events) loaded through the session's resource loader. In pi 1.x
+ * AgentSession owns the agent's beforeToolCall/afterToolCall hooks to drive the extension
+ * runner, so extensions are the supported way to intercept tool execution.
  */
-import type {
-  BeforeToolCallContext,
-  BeforeToolCallResult,
-  AfterToolCallContext,
-  AfterToolCallResult,
-} from "@earendil-works/pi-agent-core";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { log } from "./logger.js";
 import { toolCallsTotal, toolCallDuration, toolCallErrors, toolCallsBlocked } from "./metrics.js";
 
@@ -39,156 +34,129 @@ const SECRET_PATTERNS: RegExp[] = [
   /AKIA[A-Z0-9]{16}/g,          // AWS access keys
 ];
 
-// ─── Timing tracker ────────────────────────────────────────────────
+// ─── Pure helpers ──────────────────────────────────────────────────
 
-const toolStartTimes = new Map<string, number>();
+/** Reason a bash command must be blocked, or undefined when it is allowed. */
+export function findBlockedBashReason(command: string): string | undefined {
+  return BLOCKED_BASH_PATTERNS.find(({ pattern }) => pattern.test(command))?.reason;
+}
 
-// ─── Hook implementations ──────────────────────────────────────────
+/** True when text matches any known secret pattern. */
+export function containsSecret(text: string): boolean {
+  return SECRET_PATTERNS.some((pattern) => {
+    pattern.lastIndex = 0; // global patterns are stateful across test() calls
+    return pattern.test(text);
+  });
+}
+
+/** Replace every known secret pattern in text with [REDACTED]. */
+export function redactSecrets(text: string): string {
+  let out = text;
+  for (const pattern of SECRET_PATTERNS) {
+    pattern.lastIndex = 0;
+    out = out.replace(pattern, "[REDACTED]");
+  }
+  return out;
+}
+
+function truncateArgs(args: unknown): string {
+  const str = JSON.stringify(args);
+  return str.length > 200 ? str.slice(0, 200) + "…" : str;
+}
+
+// ─── Extension ─────────────────────────────────────────────────────
 
 /**
- * Called before every tool execution. Can block dangerous operations.
+ * Safety guardrails (block dangerous bash / secret writes), secret redaction of tool
+ * results, and tool-call logging + metrics. Pass to DefaultResourceLoader `extensionFactories`.
  */
-async function beforeToolCall(
-  context: BeforeToolCallContext,
-  signal?: AbortSignal,
-): Promise<BeforeToolCallResult | undefined> {
-  const { toolCall, args } = context;
-  const toolName = toolCall.name;
-  const toolCallId = toolCall.id;
+export const toolHooksExtension: ExtensionFactory = (pi) => {
+  pi.on("tool_call", (event) => {
+    log.debug("Tool call started", {
+      tool: event.toolName,
+      toolCallId: event.toolCallId,
+      argsPreview: truncateArgs(event.input),
+    });
 
-  // Start timing
-  toolStartTimes.set(toolCallId, Date.now());
-
-  log.debug("Tool call started", {
-    tool: toolName,
-    toolCallId,
-    argsPreview: truncateArgs(args),
-  });
-
-  // Check bash commands for dangerous patterns
-  if (toolName === "bash" || toolName === "Bash") {
-    const command = (args as any)?.command ?? (args as any)?.input ?? "";
-    for (const { pattern, reason } of BLOCKED_BASH_PATTERNS) {
-      if (pattern.test(command)) {
+    if (isToolCallEventType("bash", event)) {
+      const command = event.input.command ?? "";
+      const reason = findBlockedBashReason(command);
+      if (reason) {
         log.warn("Blocked dangerous bash command", {
-          tool: toolName,
-          toolCallId,
+          tool: event.toolName,
+          toolCallId: event.toolCallId,
           reason,
           command: command.slice(0, 200),
         });
-        toolCallsBlocked.inc({ tool: toolName, reason });
+        toolCallsBlocked.inc({ tool: event.toolName, reason });
         return {
           block: true,
           reason: `🛡️ Blocked: ${reason}. This operation is not allowed for safety. Use a safer alternative.`,
         };
       }
     }
-  }
 
-  // Check write tool for attempts to write secrets
-  if (toolName === "write" || toolName === "Write") {
-    const content = (args as any)?.content ?? "";
-    for (const pattern of SECRET_PATTERNS) {
-      if (pattern.test(content)) {
-        log.warn("Blocked secret write", {
-          tool: toolName,
-          toolCallId,
-        });
-        toolCallsBlocked.inc({ tool: toolName, reason: "secret_in_content" });
-        return {
-          block: true,
-          reason: "🛡️ Blocked: Content appears to contain secrets/credentials. Never write secrets to files.",
-        };
-      }
+    if (isToolCallEventType("write", event) && containsSecret(event.input.content ?? "")) {
+      log.warn("Blocked secret write", { tool: event.toolName, toolCallId: event.toolCallId });
+      toolCallsBlocked.inc({ tool: event.toolName, reason: "secret_in_content" });
+      return {
+        block: true,
+        reason: "🛡️ Blocked: Content appears to contain secrets/credentials. Never write secrets to files.",
+      };
     }
-  }
 
-  return undefined; // allow execution
-}
-
-/**
- * Called after every tool execution. Sanitizes output and logs metrics.
- */
-async function afterToolCall(
-  context: AfterToolCallContext,
-  signal?: AbortSignal,
-): Promise<AfterToolCallResult | undefined> {
-  const { toolCall, result, isError } = context;
-  const toolName = toolCall.name;
-  const toolCallId = toolCall.id;
-
-  // Calculate duration
-  const startTime = toolStartTimes.get(toolCallId);
-  const duration = startTime ? Date.now() - startTime : 0;
-  toolStartTimes.delete(toolCallId);
-
-  // Update metrics
-  toolCallsTotal.inc({ tool: toolName, status: isError ? "error" : "success" });
-  toolCallDuration.observe({ tool: toolName }, duration / 1000);
-  if (isError) {
-    toolCallErrors.inc({ tool: toolName });
-  }
-
-  log.info("Tool call completed", {
-    tool: toolName,
-    toolCallId,
-    duration,
-    isError,
-    resultSize: JSON.stringify(result.content).length,
+    return undefined;
   });
 
-  // Sanitize secrets from tool results
-  let needsSanitization = false;
-  const sanitizedContent = result.content.map((block) => {
-    if (block.type === "text" && typeof block.text === "string") {
-      let text = block.text;
-      for (const pattern of SECRET_PATTERNS) {
-        // Reset lastIndex for global patterns
-        pattern.lastIndex = 0;
-        if (pattern.test(text)) {
-          needsSanitization = true;
-          pattern.lastIndex = 0;
-          text = text.replace(pattern, "[REDACTED]");
-        }
+  // Redact secrets before the result enters the agent's context window.
+  pi.on("tool_result", (event) => {
+    let changed = false;
+    const content = event.content.map((block) => {
+      if (block.type === "text" && containsSecret(block.text)) {
+        changed = true;
+        return { ...block, text: redactSecrets(block.text) };
       }
-      if (text !== block.text) {
-        return { ...block, text };
-      }
-    }
-    return block;
-  });
-
-  if (needsSanitization) {
-    log.warn("Sanitized secrets from tool result", {
-      tool: toolName,
-      toolCallId,
+      return block;
     });
-    return { content: sanitizedContent };
-  }
+    if (!changed) return undefined;
+    log.warn("Sanitized secrets from tool result", { tool: event.toolName, toolCallId: event.toolCallId });
+    return { content };
+  });
 
-  // Signal the agent loop to stop after nats_publish — result is already published,
-  // no follow-up LLM call needed.
-  if (!isError && toolName === "nats_publish") {
-    return { terminate: true };
-  }
+  // Log model/token metadata for each LLM call (payload is passed through unmodified).
+  pi.on("before_provider_request", (event, ctx) => {
+    try {
+      const p = event.payload as any;
+      log.info("LLM request payload", {
+        model: ctx.model?.id ?? "unknown",
+        provider: ctx.model?.provider ?? "unknown",
+        messageCount: Array.isArray(p?.messages) ? p.messages.length : undefined,
+        toolCount: Array.isArray(p?.tools) ? p.tools.length : 0,
+        toolNames: Array.isArray(p?.tools) ? p.tools.map((t: any) => t?.function?.name ?? t?.name).filter(Boolean) : [],
+        hasToolChoice: p?.tool_choice !== undefined,
+        maxTokens: p?.max_tokens ?? p?.max_completion_tokens,
+        stream: p?.stream,
+      });
+      log.debug("LLM request payload (full)", { payload: p });
+    } catch (err) {
+      log.warn("before_provider_request hook threw", { error: String(err) });
+    }
+    return undefined;
+  });
 
-  return undefined; // pass through unmodified
-}
-
-// ─── Setup ─────────────────────────────────────────────────────────
-
-/**
- * Wire beforeToolCall and afterToolCall hooks into the agent session.
- */
-export function setupToolHooks(session: AgentSession): void {
-  session.agent.beforeToolCall = beforeToolCall;
-  session.agent.afterToolCall = afterToolCall;
-  log.info("Tool hooks installed (safety + observability)");
-}
-
-// ─── Helpers ───────────────────────────────────────────────────────
-
-function truncateArgs(args: unknown): string {
-  const str = JSON.stringify(args);
-  return str.length > 200 ? str.slice(0, 200) + "…" : str;
-}
+  // Fires for every finalized call (including blocked ones), with a monotonic duration.
+  pi.on("tool_execution_end", (event) => {
+    const duration = event.durationMs ?? 0;
+    const tool = event.toolName;
+    toolCallsTotal.inc({ tool, status: event.isError ? "error" : "success" });
+    toolCallDuration.observe({ tool }, duration / 1000);
+    if (event.isError) toolCallErrors.inc({ tool });
+    log.info("Tool call completed", {
+      tool,
+      toolCallId: event.toolCallId,
+      duration,
+      isError: event.isError,
+      resultSize: JSON.stringify(event.result?.content ?? null).length,
+    });
+  });
+};
