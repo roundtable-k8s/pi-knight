@@ -1,0 +1,10 @@
+# Protected paths for .github/workflows/merge-guard.yml: one extended regex per
+# line, matched against changed file paths. PRs touching these get the
+# `protected-paths` label (visibility only). Read from the base branch.
+^\.github/
+# Knight lifecycle, task/result contract and safety hooks.
+^src/drain\.ts$
+^src/nats\.ts$
+^src/result-extraction\.ts$
+^src/health\.ts$
+^src/hooks\.ts$
