@@ -4,7 +4,7 @@ import {
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { resolveModel, createTrustedSettingsManager } from "./model.js";
+import { resolveModel, createTrustedSettingsManager, type ResolvedModel } from "./model.js";
 import type { KnightConfig } from "./config.js";
 import { log } from "./logger.js";
 import { natsTools, setKnightName, setNatsPrefix } from "./tools/nats.js";
@@ -110,6 +110,16 @@ async function getSession(config: KnightConfig): Promise<AgentSession> {
   } finally {
     sessionCreating = null;
   }
+}
+
+// Seam so tests can exercise per-task model resolution without a real ModelRuntime.
+let taskModelResolver: (modelStr: string) => Promise<Pick<ResolvedModel, "model">> = (m) =>
+  resolveModel(m, { strict: true });
+/** @internal test-only: replace per-task model resolution. */
+export function __setTaskModelResolverForTests(
+  f: ((modelStr: string) => Promise<Pick<ResolvedModel, "model">>) | null,
+): void {
+  taskModelResolver = f ?? ((m) => resolveModel(m, { strict: true }));
 }
 
 // Seam so tests can exercise executeTask without a real model/SDK session.
@@ -241,7 +251,14 @@ export async function executeTask(
   config: KnightConfig,
   signal?: AbortSignal,
   runId?: string,
+  opts: { model?: string } = {},
 ): Promise<TaskResult> {
+  // Resolve a per-task model override up front: an unresolvable model is a task error
+  // (thrown to the caller), never a silent fallback to the knight default.
+  const taskModel = opts.model?.trim() || undefined;
+  const override = taskModel ? await taskModelResolver(taskModel) : undefined;
+  const modelUsed = taskModel ?? config.knightModel;
+
   // Serialize — wait for any in-flight prompt to finish
   const prevLock = promptLock;
   let releaseLock: () => void;
@@ -300,7 +317,7 @@ export async function executeTask(
     cacheRead: statsBefore.tokens.cacheRead,
   };
 
-  log.info("Executing task", { model: config.knightModel, taskLength: task.length });
+  log.info("Executing task", { model: modelUsed, taskLength: task.length });
 
   // Abort handling — if signal fires, abort the session
   let abortHandler: (() => void) | undefined;
@@ -312,10 +329,25 @@ export async function executeTask(
     signal.addEventListener("abort", abortHandler, { once: true });
   }
 
+  // Switch the live session to the per-task model, then restore the knight default
+  // afterwards so later tasks of the same run (or the next adopted session) get it back.
+  const defaultModel = override ? sess.model : undefined;
   try {
+    if (override) {
+      try {
+        await sess.setModel(override.model);
+      } catch (err) {
+        throw new Error(`Cannot use model "${taskModel}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     sessionUsed = true;
     await sess.prompt(task);
   } finally {
+    if (defaultModel) {
+      await sess.setModel(defaultModel).catch((err) => {
+        log.warn("Failed to restore knight default model after task", { error: String(err) });
+      });
+    }
     if (signal && abortHandler) {
       signal.removeEventListener("abort", abortHandler);
     }
@@ -387,7 +419,7 @@ export async function executeTask(
     error,
     cost: taskCost,
     tokens: taskTokens,
-    model: config.knightModel,
+    model: modelUsed,
     toolCalls: taskToolCalls,
   };
 }

@@ -52,6 +52,8 @@ Knights can evolve their own files over time — ConfigMap seeds the initial sta
 | `OPENAI_API_KEY` | OpenAI API key (only for native `openai/...` models) | From ExternalSecret |
 | `GEMINI_API_KEY` | Google API key (only for native `google/...` models) | From ExternalSecret |
 
+A task payload may carry an optional `model` (`provider/model`, routing suffixes such as `:floor` allowed). It is resolved through the ModelRuntime and used for that task only (the session switches model, then the knight default is restored); the result reports the model used. A model missing from the catalog/`models.json` fails the task instead of falling back.
+
 ### NATS Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
