@@ -224,10 +224,16 @@ test("executeTask: per-task model applies on the run's own session, under its lo
   assert.equal(a1.model, "m/opus");
   assert.equal(a2.model, "x/y", "next step of run-a runs on the knight default");
   assert.equal(b.model, "m/haiku");
+  // Which run's session is created first depends on async mkdir completion across the two
+  // runs, so identify each session by the workspace it was created in, never by index.
+  const sessionIn = (ws: string) => {
+    const i = cwds.findIndex((d) => d.endsWith(`/${ws}`));
+    assert.ok(i >= 0, `a session was created in ${ws}`);
+    return created[i];
+  };
   // each session saw only its own switch + restore, in that session's workspace
-  assert.deepEqual(created[0].modelLog, ["m/opus", "default"]);
-  assert.deepEqual(created[1].modelLog, ["m/haiku", "default"]);
-  assert.ok(cwds[0].endsWith(`/${workspaceName("run-a", "t1")}`) && cwds[1].endsWith(`/${workspaceName("run-b", "t3")}`));
+  assert.deepEqual(sessionIn(workspaceName("run-a", "t1")).modelLog, ["m/opus", "default"]);
+  assert.deepEqual(sessionIn(workspaceName("run-b", "t3")).modelLog, ["m/haiku", "default"]);
   // run-a steps stayed serialised even though the model switched around them
   assert.deepEqual(log.filter((l) => l.endsWith("a1") || l.endsWith("a2")), ["start a1", "end a1", "start a2", "end a2"]);
   __setTaskModelResolverForTests(null);
