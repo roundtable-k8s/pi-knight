@@ -172,7 +172,7 @@ async function main(): Promise<void> {
     },
     onLost: async (parsed) => {
       const msg = "Task was delivered to a knight that stopped before finishing it (not re-run: max_deliver=1)";
-      metrics.tasksTotal.labels(config.knightName, "error").inc();
+      metrics.recordLostTask(config.knightName);
       await publishResult(parsed.taskId, {
         task_id: parsed.taskId,
         knight: config.knightName,

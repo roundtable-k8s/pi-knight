@@ -78,3 +78,8 @@ export const toolCallsBlocked = new client.Counter({
   labelNames: ["tool", "reason"] as const,
   registers: [registry],
 });
+
+/** A task delivered to a knight that stopped before finishing it (max_deliver=1, never re-run). */
+export function recordLostTask(knight: string): void {
+  tasksTotal.labels(knight, "lost").inc();
+}
