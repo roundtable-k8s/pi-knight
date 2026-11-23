@@ -1,3 +1,6 @@
+import { mkdir, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -12,7 +15,7 @@ import { subagentTools, setParentModel, setParentKnight } from "./tools/subagent
 import { browserTools } from "./tools/browser.js";
 import { toolHooksExtension } from "./hooks.js";
 import { setupCompactionHook, updateSessionNotes } from "./memory.js";
-import { decideRunSession, pruneSessionFiles } from "./sessions.js";
+import { pruneSessionFiles } from "./sessions.js";
 import { describeSessionFailure, getBestAssistantResult, resolveTaskOutcome, summarizeSessionTail } from "./result-extraction.js";
 
 
@@ -29,53 +32,70 @@ export interface TaskResult {
   toolCalls: number;
 }
 
-// Live session — reused only across tasks of the same chain run (runId); every other
-// task gets a fresh one (#53). Not resumed from PVC history at startup either:
-// createAgentSession is given no sessionManager, so pi creates a new session file.
-let session: AgentSession | null = null;
+/**
+ * One live session per chain run (key `run:<runId>`), each with its own lock: steps of
+ * one run stay serialised on one shared session, sessions of different runs execute
+ * concurrently. A run-less task gets its own fresh session (`task:<taskId>`) so
+ * unrelated tasks never share context (#53). Nothing is resumed from PVC history at
+ * startup: createAgentSession is given no sessionManager, so pi creates a new file.
+ *
+ * The map is in LRU order and capped; only idle sessions are evicted (and disposed).
+ */
+interface SessionSlot {
+  key: string;
+  runId?: string;
+  session: AgentSession | null;
+  /** Tail of this session's prompt queue. */
+  lock: Promise<void>;
+  /** Tasks holding or waiting for the lock — a busy slot is never evicted. */
+  pending: number;
+}
+const slots = new Map<string, SessionSlot>();
+let lastActive: SessionSlot | null = null;
 
-// In-flight session creation, so a task arriving during startup pre-warm awaits the
-// same createAgentSession call instead of racing a second one.
-let sessionCreating: Promise<AgentSession> | null = null;
+/** Where per-task workspaces live: <root>/<runId|taskId>. Overridable for tests. */
+const WORK_ROOT = () => process.env.KNIGHT_WORK_ROOT ?? "/data/work";
+const MIN_SESSIONS = 8;
 
-// True once the current session has been prompted. An unused session has no context
-// to bleed, so a new chain run can adopt it instead of paying dispose+recreate.
-let sessionUsed = false;
-
-// The chain runId the current session belongs to. A task whose runId differs starts a
-// fresh session to prevent cross-run context bleed, and so does a task without a runId. (#31, #53)
-let currentRunId: string | undefined;
-
-/** Get the active session (or null if not yet created). Used by introspect. */
+/** Get the most recently used session (or null). Used by introspect. */
 export function getActiveSession(): AgentSession | null {
-  return session;
+  return lastActive?.session ?? null;
+}
+
+/** All live sessions, for shutdown. */
+export function getActiveSessions(): AgentSession[] {
+  return [...slots.values()].flatMap((s) => (s.session ? [s.session] : []));
 }
 
 /**
- * Pre-warm the persistent session at startup (fire-and-forget).
- *
- * Cold createAgentSession has been observed to take ~79s on knights with a
- * long PVC session history — latency that otherwise lands inside the first
- * task's timeout window. Failures are logged and left for the first task's
- * getSession() to retry, so a transient error here never crashes the knight.
+ * Warm up at startup (fire-and-forget): create and immediately dispose a throwaway
+ * session, so the cold-start cost (observed ~79s on knights with long PVC history)
+ * lands here instead of inside the first task's timeout window. Sessions are bound to
+ * their task's working directory, so the warm one cannot be adopted. Failures are only logged.
  */
 export function warmSession(config: KnightConfig): void {
-  getSession(config)
-    .then(() => log.info("Session pre-warmed at startup"))
-    .catch((err) =>
-      log.warn("Session pre-warm failed — first task will retry", { error: String(err) }),
-    );
+  const cwd = join(WORK_ROOT(), ".warm");
+  mkdir(cwd, { recursive: true })
+    .then(() => sessionFactory(config, cwd))
+    .then((s) => {
+      s.dispose();
+      log.info("Session pre-warmed at startup");
+    })
+    .catch((err) => log.warn("Session pre-warm failed — first task pays the cold start", { error: String(err) }))
+    .finally(() => rm(cwd, { recursive: true, force: true }).catch(() => {}));
 }
 
 /**
  * Enforce the on-disk session retention policy (fire-and-forget). Per-run sessions
  * each persist their own JSONL file, so without this the PVC grows with every chain
- * run. The live session's file is always kept.
+ * run. Live sessions' files are always kept.
  */
 export function pruneOldSessions(config: KnightConfig): void {
   const keep = new Set<string>();
-  const live = session?.sessionManager.getSessionFile();
-  if (live) keep.add(live);
+  for (const s of getActiveSessions()) {
+    const live = s.sessionManager.getSessionFile();
+    if (live) keep.add(live);
+  }
   pruneSessionFiles(
     {
       maxFiles: config.sessionRetentionMaxFiles,
@@ -89,26 +109,30 @@ export function pruneOldSessions(config: KnightConfig): void {
     .catch((err) => log.warn("Session retention prune failed", { error: String(err) }));
 }
 
-// Serialize prompt() calls — Pi SDK sessions handle one prompt at a time
-let promptLock: Promise<void> = Promise.resolve();
+function getSlot(key: string, runId: string | undefined, config: KnightConfig): SessionSlot {
+  let slot = slots.get(key);
+  if (slot) {
+    slots.delete(key); // re-insert at the MRU end
+  } else {
+    slot = { key, runId, session: null, lock: Promise.resolve(), pending: 0 };
+  }
+  slots.set(key, slot);
+  const cap = Math.max(MIN_SESSIONS, (config.maxConcurrentTasks ?? 1) * 4);
+  for (const [k, s] of slots) {
+    if (slots.size <= cap) break;
+    if (s.pending > 0 || k === key) continue;
+    dropSlot(s);
+  }
+  return slot;
+}
 
-/**
- * Get or create the persistent AgentSession.
- *
- * The session persists across tasks (JSONL on PVC), giving the knight
- * memory of previous work. Pi SDK handles auto-compaction when context grows.
- */
-async function getSession(config: KnightConfig): Promise<AgentSession> {
-  if (session) return session;
-  if (sessionCreating) return sessionCreating;
-  sessionCreating = sessionFactory(config);
+function dropSlot(slot: SessionSlot): void {
+  slots.delete(slot.key);
+  if (lastActive === slot) lastActive = null;
   try {
-    const created = await sessionCreating;
-    session = created;
-    sessionUsed = false;
-    return created;
-  } finally {
-    sessionCreating = null;
+    slot.session?.dispose();
+  } catch (err) {
+    log.warn("Failed to dispose session", { key: slot.key, error: String(err) });
   }
 }
 
@@ -123,24 +147,31 @@ export function __setTaskModelResolverForTests(
 }
 
 // Seam so tests can exercise executeTask without a real model/SDK session.
-let sessionFactory: (config: KnightConfig) => Promise<AgentSession> = (c) => createSession(c);
+let sessionFactory: (config: KnightConfig, cwd: string) => Promise<AgentSession> = (c, cwd) => createSession(c, cwd);
 /** @internal test-only: replace session creation and reset module session state. */
 export function __setSessionFactoryForTests(
-  f: ((config: KnightConfig) => Promise<AgentSession>) | null,
+  f: ((config: KnightConfig, cwd: string) => Promise<AgentSession>) | null,
 ): void {
-  sessionFactory = f ?? ((c) => createSession(c));
-  session = null;
-  sessionCreating = null;
-  sessionUsed = false;
-  currentRunId = undefined;
+  sessionFactory = f ?? ((c, cwd) => createSession(c, cwd));
+  slots.clear();
+  lastActive = null;
 }
 
-async function createSession(config: KnightConfig): Promise<AgentSession> {
+/**
+ * Per-task workspace directory name, filesystem-safe. Prefixed `run-` / `task-` to mirror
+ * the slot key, so a run-less taskId can never share a dir with a concurrent run's id.
+ */
+export function workspaceName(runId: string | undefined, taskId: string): string {
+  const safe = (runId || taskId).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "x";
+  return `${runId ? "run" : "task"}-${safe}`;
+}
+
+async function createSession(config: KnightConfig, cwd: string): Promise<AgentSession> {
   const tStart = Date.now();
   const { model, provider, modelName, modelRuntime } = await resolveModel(config.knightModel);
   const resolveModelMs = Date.now() - tStart;
 
-  log.info("Creating persistent session", { provider, model: modelName });
+  log.info("Creating session", { provider, model: modelName, cwd });
 
   setKnightName(config.knightName);
   // Derive NATS prefix from results prefix (e.g. "rt-dev.results" → "rt-dev")
@@ -182,7 +213,7 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
   const { session: newSession } = await createAgentSession({
     model,
     thinkingLevel,
-    cwd: "/data",
+    cwd,
     agentDir: "/data",
     modelRuntime,
     // Explicitly trust the project dir; see model.ts.
@@ -226,7 +257,7 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
   // knight with PVC history): createAgentSessionMs covers history load +
   // model registry; anything else shows up in the total.
   const stats = newSession.getSessionStats();
-  log.info("Persistent session created", {
+  log.info("Session created", {
     sessionId: stats.sessionId,
     priorMessages: stats.totalMessages,
     priorCost: stats.cost,
@@ -239,11 +270,11 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
 }
 
 /**
- * Execute a task on the persistent session.
+ * Execute a task on its run's session (see SessionSlot).
  *
  * Tasks of one chain run (same runId) are prompts on the same session and share
- * context. A task without a runId, or with a different one, starts a fresh session
- * (#53) — cross-task memory lives in files on the PVC. Pi SDK auto-compacts when
+ * context, serialised. A task without a runId, or with a different one, gets its own
+ * session and runs concurrently (#53) — cross-task memory lives in files on the PVC. Pi SDK auto-compacts when
  * context grows too large.
  */
 export async function executeTask(
@@ -251,61 +282,54 @@ export async function executeTask(
   config: KnightConfig,
   signal?: AbortSignal,
   runId?: string,
+  taskId?: string,
   opts: { model?: string } = {},
 ): Promise<TaskResult> {
-  // Resolve a per-task model override up front: an unresolvable model is a task error
-  // (thrown to the caller), never a silent fallback to the knight default.
-  const taskModel = opts.model?.trim() || undefined;
-  const override = taskModel ? await taskModelResolver(taskModel) : undefined;
-  const modelUsed = taskModel ?? config.knightModel;
-
-  // Serialize — wait for any in-flight prompt to finish
-  const prevLock = promptLock;
-  let releaseLock: () => void;
-  promptLock = new Promise((resolve) => { releaseLock = resolve; });
+  // Same runId → same session, queued behind that run's earlier steps; anything else
+  // runs on its own session, concurrently. Run-less tasks never share one (#31, #53).
+  const id = taskId || randomUUID();
+  const slot = getSlot(runId ? `run:${runId}` : `task:${id}`, runId || undefined, config);
+  const prevLock = slot.lock;
+  let releaseLock!: () => void;
+  slot.lock = new Promise((resolve) => { releaseLock = resolve; });
+  slot.pending++;
   await prevLock;
 
-  // Start a fresh session unless this task continues the current chain run (#31, #53).
-  // This runs inside the serialized region so it can't race a concurrent task's prompt.
-  // runId is optional and ad-hoc tasks never carry one — they get a fresh session each,
-  // otherwise unrelated tasks pile into one ever-growing, cross-contaminated session.
-  // A pristine session (never prompted, no PVC history) has no context to bleed and is
-  // adopted instead — this is what keeps startup pre-warming effective.
-  const action = decideRunSession({
-    runId,
-    currentRunId,
-    hasSession: session !== null,
-    sessionPristine: session !== null && !sessionUsed && session.getSessionStats().totalMessages === 0,
-  });
-  if (action === "adopt") {
-    log.info("Adopting pre-warmed unused session for new task", {
-      previousRunId: currentRunId ?? null,
-      runId,
-    });
-  } else if (action === "reset" && session) {
-    log.info("New run or run-less task — starting a fresh agent session to avoid context bleed", {
-      previousRunId: currentRunId ?? null,
-      runId,
-    });
-    try {
-      session.dispose();
-    } catch (err) {
-      log.warn("Failed to dispose prior session on run change", { error: String(err) });
-    }
-    session = null;
-  }
-  currentRunId = runId || undefined;
-
-  let sess: AgentSession;
+  // Resolve a per-task model override before touching the session: an unresolvable model is
+  // a task error (thrown to the caller), never a silent fallback to the knight default.
+  // Done after taking the run's queue position so steps of a run keep their arrival order.
+  const taskModel = opts.model?.trim() || undefined;
+  const modelUsed = taskModel ?? config.knightModel;
+  let override: Awaited<ReturnType<typeof taskModelResolver>> | undefined;
   try {
-    sess = await getSession(config);
+    override = taskModel ? await taskModelResolver(taskModel) : undefined;
   } catch (err) {
-    // Session creation failed (more likely now that each run creates one): release the
-    // prompt lock or every later task would wait on it forever.
-    releaseLock!();
+    slot.pending--;
+    releaseLock();
+    if (!slot.session && slot.pending === 0) slots.delete(slot.key);
     throw err;
   }
-  if (action === "reset") pruneOldSessions(config);
+
+  const workDir = join(WORK_ROOT(), workspaceName(runId, id));
+  let sess: AgentSession;
+  let created = false;
+  try {
+    await mkdir(workDir, { recursive: true });
+    if (!slot.session) {
+      slot.session = await sessionFactory(config, workDir);
+      created = true;
+    }
+    sess = slot.session;
+  } catch (err) {
+    // Session creation failed: release the lock or later steps of this run would wait forever.
+    slot.pending--;
+    releaseLock();
+    if (!slot.session && slot.pending === 0) slots.delete(slot.key);
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
+  lastActive = slot;
+  if (created) pruneOldSessions(config);
 
   // Snapshot stats before this task
   const statsBefore = sess.getSessionStats();
@@ -317,7 +341,7 @@ export async function executeTask(
     cacheRead: statsBefore.tokens.cacheRead,
   };
 
-  log.info("Executing task", { model: modelUsed, taskLength: task.length });
+  log.info("Executing task", { model: modelUsed, taskLength: task.length, runId: runId ?? null, workDir });
 
   // Abort handling — if signal fires, abort the session
   let abortHandler: (() => void) | undefined;
@@ -329,9 +353,10 @@ export async function executeTask(
     signal.addEventListener("abort", abortHandler, { once: true });
   }
 
-  // Switch the live session to the per-task model, then restore the knight default
-  // afterwards so later tasks of the same run (or the next adopted session) get it back.
+  // Switch this run's own session to the per-task model (we hold the slot lock), then
+  // restore the knight default afterwards so later steps of the run get it back.
   const defaultModel = override ? sess.model : undefined;
+  let promptFailed = true;
   try {
     if (override) {
       try {
@@ -340,8 +365,8 @@ export async function executeTask(
         throw new Error(`Cannot use model "${taskModel}": ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    sessionUsed = true;
     await sess.prompt(task);
+    promptFailed = false;
   } finally {
     if (defaultModel) {
       await sess.setModel(defaultModel).catch((err) => {
@@ -351,7 +376,11 @@ export async function executeTask(
     if (signal && abortHandler) {
       signal.removeEventListener("abort", abortHandler);
     }
-    releaseLock!();
+    // Removed after each task (a run's next step recreates it); kept on failure only with DEBUG.
+    // Must finish before the lock is released, or it would delete the next step's fresh dir.
+    if (!(promptFailed && process.env.DEBUG)) await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    slot.pending--;
+    releaseLock();
   }
 
   // Diff stats to get this task's contribution. Clamp at 0: session-cumulative stats

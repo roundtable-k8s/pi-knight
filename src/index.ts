@@ -3,7 +3,7 @@ import { initLogger, log } from "./logger.js";
 import { connectNats, subscribe, publishResult, drain, HEARTBEAT_MS, type TaskDelivery } from "./nats.js";
 import { startHealthServer, stopHealthServer, setSkillCount, setActiveTaskCount, setDegradedReason } from "./health.js";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
-import { executeTask, getActiveSession, pruneOldSessions, warmSession } from "./knight.js";
+import { executeTask, getActiveSessions, pruneOldSessions, warmSession } from "./knight.js";
 import { startIntrospect } from "./introspect.js";
 import { resolveModel } from "./model.js";
 import { preflightModelUntilReady } from "./preflight.js";
@@ -101,7 +101,7 @@ async function main(): Promise<void> {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const result = await executeTask(taskText, config, controller.signal, runId, { model });
+      const result = await executeTask(taskText, config, controller.signal, runId, taskId, { model });
       const durationMs = Date.now() - startTime;
 
       await publishResult(taskId, {
@@ -204,10 +204,12 @@ async function main(): Promise<void> {
 
     // Dispose the session to abort any in-flight agent/compaction/retry/bash work
     // (disposal cancels in-flight work) before we tear down NATS.
-    try {
-      getActiveSession()?.dispose();
-    } catch (e) {
-      log.error("Session dispose error", { error: String(e) });
+    for (const s of getActiveSessions()) {
+      try {
+        s.dispose();
+      } catch (e) {
+        log.error("Session dispose error", { error: String(e) });
+      }
     }
 
     await drain().catch((e) => log.error("NATS drain error", { error: String(e) }));
