@@ -1,6 +1,6 @@
 import { loadConfig } from "./config.js";
 import { initLogger, log } from "./logger.js";
-import { connectNats, subscribe, publishResult, drain } from "./nats.js";
+import { connectNats, subscribe, publishResult, drain, HEARTBEAT_MS, type TaskDelivery } from "./nats.js";
 import { startHealthServer, stopHealthServer, setSkillCount, setActiveTaskCount, setDegradedReason } from "./health.js";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { executeTask, getActiveSession, pruneOldSessions, warmSession } from "./knight.js";
@@ -80,15 +80,18 @@ async function main(): Promise<void> {
   startIntrospect(config);
 
   // Subscribe to task stream
-  const tasks = await subscribe(config);
 
   // Task execution state
   let activeCount = 0;
-  const taskQueue: Array<{ task: string; taskId: string; timeoutMs?: number; runId?: string; model?: string }> = [];
+  let puller: Awaited<ReturnType<typeof subscribe>> | null = null;
   let shuttingDown = false;
 
   // Process a single task
-  async function processTask(taskText: string, taskId: string, timeoutMs: number, runId?: string, model?: string): Promise<void> {
+  async function processTask(delivery: TaskDelivery): Promise<void> {
+    const { task: taskText, taskId, runId, model } = delivery.task;
+    const timeoutMs = delivery.task.timeoutMs ?? config.taskTimeoutMs;
+    // Keep the message un-acked but alive while the task runs; ack only when it finishes.
+    const heartbeat = setInterval(() => delivery.working(), HEARTBEAT_MS);
     activeCount++;
     setActiveTaskCount(activeCount);
     metrics.activeTasks.labels(config.knightName).set(activeCount);
@@ -145,38 +148,45 @@ async function main(): Promise<void> {
       metrics.taskDuration.labels(config.knightName).observe(durationMs / 1000);
     } finally {
       clearTimeout(timeout);
+      clearInterval(heartbeat);
+      delivery.ack();
       activeCount--;
       setActiveTaskCount(activeCount);
       metrics.activeTasks.labels(config.knightName).set(activeCount);
-
-      if (taskQueue.length > 0 && activeCount < config.maxConcurrentTasks) {
-        const next = taskQueue.shift()!;
-        processTask(next.task, next.taskId, next.timeoutMs ?? config.taskTimeoutMs, next.runId, next.model);
-      }
+      puller?.wake();
     }
   }
 
-  // Message loop
-  (async () => {
-    for await (const parsed of tasks) {
-      if (shuttingDown) break;
-
-      // Skip self-echo — ignore messages published by this knight back to its own topic
-      if (parsed.from && parsed.from.toLowerCase() === config.knightName.toLowerCase()) {
-        log.debug("Skipping self-echo", { taskId: parsed.taskId, from: parsed.from });
-        continue;
-      }
-
-      const timeoutMs = parsed.timeoutMs ?? config.taskTimeoutMs;
-
-      if (activeCount >= config.maxConcurrentTasks) {
-        log.info("At capacity, queuing task", { taskId: parsed.taskId, queueSize: taskQueue.length + 1 });
-        taskQueue.push({ task: parsed.task, taskId: parsed.taskId, timeoutMs, runId: parsed.runId, model: parsed.model });
-      } else {
-        processTask(parsed.task, parsed.taskId, timeoutMs, parsed.runId, parsed.model);
-      }
-    }
-  })();
+  // Pull only when a slot is free; backlog stays in the stream (consumer lag), not in memory.
+  puller = await subscribe(config, {
+    freeSlots: () => (shuttingDown ? 0 : config.maxConcurrentTasks - activeCount),
+    // Skip self-echo — ignore messages published by this knight back to its own topic
+    accept: (parsed) => {
+      const self = !!parsed.from && parsed.from.toLowerCase() === config.knightName.toLowerCase();
+      if (self) log.debug("Skipping self-echo", { taskId: parsed.taskId, from: parsed.from });
+      return !self;
+    },
+    onTask: (delivery) => {
+      void processTask(delivery);
+    },
+    onLost: async (parsed) => {
+      const msg = "Task was delivered to a knight that stopped before finishing it (not re-run: max_deliver=1)";
+      metrics.tasksTotal.labels(config.knightName, "error").inc();
+      await publishResult(parsed.taskId, {
+        task_id: parsed.taskId,
+        knight: config.knightName,
+        success: false,
+        result: `Task failed: ${msg}`,
+        error: msg,
+        lost: true,
+        duration_ms: 0,
+        cost: 0,
+        tokens: { input: 0, output: 0 },
+        model: config.knightModel,
+        timestamp: new Date().toISOString(),
+      });
+    },
+  });
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
