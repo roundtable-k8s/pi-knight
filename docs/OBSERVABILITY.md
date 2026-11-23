@@ -60,6 +60,7 @@ Expose metrics on `/metrics` endpoint (HTTP, same port as health check).
 pi_knight_tasks_total{knight="galahad",status="success"} 42
 pi_knight_tasks_total{knight="galahad",status="error"} 3
 pi_knight_tasks_total{knight="galahad",status="timeout"} 1
+pi_knight_tasks_total{knight="galahad",status="lost"} 1
 
 # Task duration (histogram)
 pi_knight_task_duration_seconds_bucket{knight="galahad",le="10"} 5
@@ -188,6 +189,7 @@ The Prometheus metrics provide rolling totals. Combined with Grafana:
 | KnightDown | `pi_knight_nats_connected == 0` for 5m | Critical |
 | HighErrorRate | `rate(pi_knight_tasks_total{status="error"}[15m]) > 0.3` | Warning |
 | TaskTimeout | `pi_knight_tasks_total{status="timeout"}` increases | Warning |
+| TaskLost | `increase(pi_knight_tasks_total{status="lost"}[15m]) > 0` | Warning |
 | HighCost | `rate(pi_knight_llm_cost_dollars_total[1h]) > 5` | Info |
 | ConsumerLag | Pending messages > 10 for 10m | Warning |
 | NoTasks | No tasks completed in 24h | Info |
