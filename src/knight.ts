@@ -157,9 +157,13 @@ export function __setSessionFactoryForTests(
   lastActive = null;
 }
 
-/** Per-task workspace directory name: runId when present, else taskId; filesystem-safe. */
-export function workspaceName(key: string): string {
-  return key.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_").slice(0, 120) || "task";
+/**
+ * Per-task workspace directory name, filesystem-safe. Prefixed `run-` / `task-` to mirror
+ * the slot key, so a run-less taskId can never share a dir with a concurrent run's id.
+ */
+export function workspaceName(runId: string | undefined, taskId: string): string {
+  const safe = (runId || taskId).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "x";
+  return `${runId ? "run" : "task"}-${safe}`;
 }
 
 async function createSession(config: KnightConfig, cwd: string): Promise<AgentSession> {
@@ -306,7 +310,7 @@ export async function executeTask(
     throw err;
   }
 
-  const workDir = join(WORK_ROOT(), workspaceName(runId || id));
+  const workDir = join(WORK_ROOT(), workspaceName(runId, id));
   let sess: AgentSession;
   let created = false;
   try {
@@ -373,7 +377,7 @@ export async function executeTask(
       signal.removeEventListener("abort", abortHandler);
     }
     // Removed after each task (a run's next step recreates it); kept on failure only with DEBUG.
-    // Must finish before the lock is released, or it races the next step's mkdir.
+    // Must finish before the lock is released, or it would delete the next step's fresh dir.
     if (!(promptFailed && process.env.DEBUG)) await rm(workDir, { recursive: true, force: true }).catch(() => {});
     slot.pending--;
     releaseLock();

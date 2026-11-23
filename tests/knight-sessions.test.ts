@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeTask, __setSessionFactoryForTests, __setTaskModelResolverForTests } from "../src/knight.ts";
+import { executeTask, workspaceName, __setSessionFactoryForTests, __setTaskModelResolverForTests } from "../src/knight.ts";
 import type { KnightConfig } from "../src/config.ts";
 
 // Minimal fake AgentSession: records prompts as messages so we can see what each
@@ -37,7 +37,9 @@ function fakeSession(id: number, disposed: number[]) {
   };
 }
 
+// Tests must never touch /data.
 process.env.KNIGHT_WORK_ROOT = mkdtempSync(join(tmpdir(), "pk-work-"));
+process.env.KNIGHT_DATA_DIR = mkdtempSync(join(tmpdir(), "pk-data-"));
 const config = { knightName: "t", knightModel: "x/y", sessionRetentionMaxFiles: 0, sessionRetentionDays: 0 } as unknown as KnightConfig;
 
 function setup() {
@@ -141,21 +143,59 @@ test("executeTask: tasks of different runs overlap in time, with separate sessio
   assert.equal(created.length, 3);
   for (const s of created) assert.equal(s.messages.length, 2, "no message sharing");
   assert.equal(new Set(cwds).size, 3);
-  assert.ok(cwds[0].endsWith("/run-a") && cwds[1].endsWith("/run-b") && cwds[2].endsWith("/t3"));
+  assert.deepEqual(cwds.map((d) => d.split("/").pop()).sort(), ["run-run-a", "run-run-b", "task-t3"]);
   for (const d of cwds) assert.ok(!existsSync(d), "workspace removed after the task");
   __setSessionFactoryForTests(null);
 });
 
 test("executeTask: steps of the same run serialise on one session", async () => {
+  // Gate-driven, not timing-driven: step 2 must not start until step 1 is released.
   const log: string[] = [];
-  const { created } = slowSetup(log);
-  await Promise.all([
-    executeTask("s1", config, undefined, "run-x", "t1"),
-    executeTask("s2", config, undefined, "run-x", "t2"),
-  ]);
+  let release1!: () => void;
+  const gate1 = new Promise<void>((r) => (release1 = r));
+  let started1!: () => void;
+  const started1P = new Promise<void>((r) => (started1 = r));
+  const created: any[] = [];
+  __setSessionFactoryForTests(async (_c, cwd) => {
+    const s: any = fakeSession(created.length + 1, []);
+    s.prompt = async (t: string) => {
+      log.push(`start ${t}`);
+      s.messages.push({ role: "user", content: t });
+      assert.ok(existsSync(cwd), "workspace exists while prompting");
+      if (t === "s1") {
+        started1();
+        await gate1;
+      }
+      s.messages.push({ role: "assistant", content: `done: ${t}` });
+      log.push(`end ${t}`);
+    };
+    created.push(s);
+    return s;
+  });
+  const p1 = executeTask("s1", config, undefined, "run-x", "t1");
+  const p2 = executeTask("s2", config, undefined, "run-x", "t2");
+  await started1P;
+  // Let any (wrongly) unserialised step 2 run before we check it hasn't.
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(log, ["start s1"], "s2 is queued while s1 is in flight");
+  release1();
+  await Promise.all([p1, p2]);
   assert.deepEqual(log, ["start s1", "end s1", "start s2", "end s2"]);
   assert.equal(created.length, 1, "one session created despite the concurrent start");
   assert.equal(created[0].messages.length, 4);
+  __setSessionFactoryForTests(null);
+});
+
+test("executeTask: a run-less taskId never shares a workspace with a run of the same id", async () => {
+  const log: string[] = [];
+  const { cwds } = slowSetup(log);
+  await Promise.all([
+    executeTask("a", config, undefined, "same", "t1"),
+    executeTask("b", config, undefined, undefined, "same"),
+  ]);
+  assert.equal(new Set(cwds).size, 2);
+  assert.equal(workspaceName("same", "x"), "run-same");
+  assert.equal(workspaceName(undefined, "same"), "task-same");
   __setSessionFactoryForTests(null);
 });
 
@@ -187,7 +227,7 @@ test("executeTask: per-task model applies on the run's own session, under its lo
   // each session saw only its own switch + restore, in that session's workspace
   assert.deepEqual(created[0].modelLog, ["m/opus", "default"]);
   assert.deepEqual(created[1].modelLog, ["m/haiku", "default"]);
-  assert.ok(cwds[0].endsWith("/run-a") && cwds[1].endsWith("/run-b"));
+  assert.ok(cwds[0].endsWith(`/${workspaceName("run-a", "t1")}`) && cwds[1].endsWith(`/${workspaceName("run-b", "t3")}`));
   // run-a steps stayed serialised even though the model switched around them
   assert.deepEqual(log.filter((l) => l.endsWith("a1") || l.endsWith("a2")), ["start a1", "end a1", "start a2", "end a2"]);
   __setTaskModelResolverForTests(null);

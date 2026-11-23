@@ -16,9 +16,11 @@ import { log } from "./logger.js";
 
 // ─── Directories ────────────────────────────────────────────────
 
-const SESSION_NOTES_DIR = "/data/session-notes";
-const SESSION_NOTES_FILE = `${SESSION_NOTES_DIR}/current.md`;
-const SCRATCH_DIR = "/data/scratch";
+// Overridable (tests must not touch /data); read lazily so env set after import applies.
+const DATA_DIR = () => process.env.KNIGHT_DATA_DIR ?? "/data";
+const SESSION_NOTES_DIR = () => `${DATA_DIR()}/session-notes`;
+const SESSION_NOTES_FILE = () => `${SESSION_NOTES_DIR()}/current.md`;
+const SCRATCH_DIR = () => `${DATA_DIR()}/scratch`;
 
 /**
  * Subscribe to Pi SDK compaction/retry events for observability only.
@@ -87,8 +89,8 @@ export async function updateSessionNotes(
   result: string,
 ): Promise<void> {
   // Ensure directories exist
-  await ensureDir(SESSION_NOTES_DIR);
-  await ensureDir(SCRATCH_DIR);
+  await ensureDir(SESSION_NOTES_DIR());
+  await ensureDir(SCRATCH_DIR());
 
   const now = new Date().toISOString();
   const taskPreview = task.length > 200 ? task.slice(0, 200) + "…" : task;
@@ -97,7 +99,7 @@ export async function updateSessionNotes(
   // Read existing notes if any
   let existing = "";
   try {
-    existing = await readFile(SESSION_NOTES_FILE, "utf-8");
+    existing = await readFile(SESSION_NOTES_FILE(), "utf-8");
   } catch {
     // File doesn't exist yet — that's fine
   }
@@ -133,10 +135,10 @@ ${resultPreview}
 - ${now}: Executed task, produced result (${result.length} chars)
 `;
 
-  await writeFile(SESSION_NOTES_FILE, notes, "utf-8");
+  await writeFile(SESSION_NOTES_FILE(), notes, "utf-8");
   log.debug("Session notes updated", {
     knight: knightName,
-    file: SESSION_NOTES_FILE,
+    file: SESSION_NOTES_FILE(),
     size: notes.length,
   });
 }
