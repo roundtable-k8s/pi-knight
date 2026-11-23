@@ -1,7 +1,7 @@
 import { loadConfig } from "./config.js";
 import { initLogger, log } from "./logger.js";
 import { connectNats, subscribe, publishResult, drain, HEARTBEAT_MS, type TaskDelivery } from "./nats.js";
-import { waitForInflight } from "./drain.js";
+import { createShutdown, installSignalHandlers } from "./drain.js";
 import { startHealthServer, stopHealthServer, setSkillCount, setActiveTaskCount, setDegradedReason, setDraining } from "./health.js";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { executeTask, getActiveSessions, pruneOldSessions, warmSession } from "./knight.js";
@@ -189,38 +189,33 @@ async function main(): Promise<void> {
     },
   });
 
-  // Graceful shutdown
-  const shutdown = async (signal: string) => {
-    if (shuttingDown) return;
-    log.info("Shutdown signal received — draining", { signal, activeCount });
-    shuttingDown = true;
-    setDraining(true); // /ready -> 503 so the pod leaves Service endpoints
-    await puller?.stop(); // no new fetches; in-flight tasks keep heartbeating
-
-    const left = await waitForInflight({ getActive: () => activeCount, maxWaitMs: config.drainTimeoutMs });
-    if (left > 0) {
-      log.warn("Forcing shutdown with active tasks", { activeCount: left });
-    }
-
-    // Dispose the session to abort any in-flight agent/compaction/retry/bash work
-    // (disposal cancels in-flight work) before we tear down NATS.
-    for (const s of getActiveSessions()) {
-      try {
-        s.dispose();
-      } catch (e) {
-        log.error("Session dispose error", { error: String(e) });
+  // Graceful shutdown (sequence lives in drain.ts so tests run the real thing)
+  const shutdown = createShutdown({
+    setDraining: (d) => {
+      shuttingDown = d; // freeSlots() -> 0: no new fetches
+      setDraining(d);
+    },
+    stopPulling: async () => void (await puller?.stop()),
+    getActive: () => activeCount,
+    maxWaitMs: config.drainTimeoutMs,
+    // Dispose sessions to abort in-flight agent/compaction/retry/bash work.
+    abortInflight: () => {
+      for (const s of getActiveSessions()) {
+        try {
+          s.dispose();
+        } catch (e) {
+          log.error("Session dispose error", { error: String(e) });
+        }
       }
-    }
-
-    await drain().catch((e) => log.error("NATS drain error", { error: String(e) }));
-    metrics.natsConnected.labels(config.knightName).set(0);
-    await stopHealthServer();
-    log.info("Shutdown complete");
-    process.exit(0);
-  };
-
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+    },
+    drainNats: drain,
+    cleanup: async () => {
+      metrics.natsConnected.labels(config.knightName).set(0);
+      await stopHealthServer();
+    },
+    exit: (code) => process.exit(code),
+  });
+  installSignalHandlers(shutdown);
 
   log.info("Pi-Knight ready");
 }
