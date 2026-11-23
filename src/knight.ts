@@ -109,7 +109,7 @@ async function getSession(config: KnightConfig): Promise<AgentSession> {
 
 async function createSession(config: KnightConfig): Promise<AgentSession> {
   const tStart = Date.now();
-  const { model, provider, modelName, authStorage, modelRegistry } = resolveModel(config.knightModel);
+  const { model, provider, modelName, modelRuntime } = await resolveModel(config.knightModel);
   const resolveModelMs = Date.now() - tStart;
 
   log.info("Creating persistent session", { provider, model: modelName });
@@ -128,9 +128,8 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
     thinkingLevel,
     cwd: "/data",
     agentDir: "/data",
-    authStorage,
-    modelRegistry,
-    // Explicitly trust the project dir (pi 0.79 project-trust gating); see model.ts.
+    modelRuntime,
+    // Explicitly trust the project dir; see model.ts.
     settingsManager: createTrustedSettingsManager("/data", "/data"),
     customTools: [
       ...natsTools,
