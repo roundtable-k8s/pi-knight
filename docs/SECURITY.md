@@ -89,6 +89,7 @@ Pi-Knight restricts what the agent's built-in tools can do:
 - Network access controlled by NetworkPolicy (not bash filtering)
 - No `sudo`, no privilege escalation (container security handles this)
 - Timeout enforcement via AbortController
+- A `tool_call` hook blocks a small set of destructive commands: `rm -rf /`, `mkfs`, `dd of=/dev/…`, `chmod 777`, and `git push` with a `-f`/`--force` flag token (`--force-with-lease` is allowed). Piping a download to a shell (`curl … | sh`) is deliberately not blocked: it only ever caught normal tool installs and text inside heredocs, fixtures and commit messages, and network egress is controlled by NetworkPolicy.
 
 ### Vault Write Scoping
 ```typescript

@@ -15,10 +15,10 @@ import { toolCallsTotal, toolCallDuration, toolCallErrors, toolCallsBlocked } fr
 /** Bash commands that should be blocked outright */
 const BLOCKED_BASH_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\brm\s+-rf\s+\/(?!\w)/, reason: "Recursive delete at root level" },
-  { pattern: /\bgit\s+push\s+.*--force(?!\s*-with-lease)/, reason: "Force push without lease (use --force-with-lease or new commits)" },
-  { pattern: /\bgit\s+push\s+.*-f\b/, reason: "Force push (use new commits instead)" },
+  // Match the flag as a whole token: not a branch like `fix-f`, and --force-with-lease stays allowed.
+  { pattern: /\bgit\s+push\b[^;&|\n]*\s--force(?=\s|$)/, reason: "Force push without lease (use --force-with-lease or new commits)" },
+  { pattern: /\bgit\s+push\b[^;&|\n]*\s-[a-zA-Z]*f[a-zA-Z]*(?=\s|$)/, reason: "Force push (use new commits instead)" },
   { pattern: /\bchmod\s+777\b/, reason: "World-writable permissions" },
-  { pattern: /\bcurl\b.*\|\s*(?:ba)?sh/, reason: "Piping remote script to shell" },
   { pattern: /\bdd\s+.*of=\/dev\//, reason: "Direct device write" },
   { pattern: /\bmkfs\b/, reason: "Filesystem format" },
 ];
