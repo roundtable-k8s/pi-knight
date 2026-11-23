@@ -77,23 +77,27 @@ export const spawnSubagentTool = defineTool({
       // Shared resolution — same model/auth handling as the parent knight.
       const { model, modelRuntime } = await resolveModel(modelStr);
 
+      const settingsManager = createTrustedSettingsManager("/data", "/data");
+      const resourceLoader = new DefaultResourceLoader({
+        cwd: "/data",
+        agentDir: "/data",
+        settingsManager,
+        noExtensions: true,
+        noThemes: true,
+        noPromptTemplates: true,
+        noSkills: true, // Sub-agents are focused — no skill discovery overhead
+        systemPrompt,
+      });
+      await resourceLoader.reload();
+
       ({ session } = await createAgentSession({
         model,
         thinkingLevel,
         cwd: "/data",
         agentDir: "/data",
         modelRuntime,
-        // Explicitly trust the project dir; see model.ts.
-        settingsManager: createTrustedSettingsManager("/data", "/data"),
-        resourceLoader: new DefaultResourceLoader({
-          cwd: "/data",
-          agentDir: "/data",
-          noExtensions: true,
-          noThemes: true,
-          noPromptTemplates: true,
-          noSkills: true, // Sub-agents are focused — no skill discovery overhead
-          systemPrompt,
-        }),
+        settingsManager,
+        resourceLoader,
       }));
 
       // Wire abort signal

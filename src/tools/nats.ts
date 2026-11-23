@@ -82,7 +82,8 @@ export const natsPublishTool = defineTool({
     try {
       await js.publish(params.subject, sc.encode(params.message));
       log.info("nats_publish tool", { subject: params.subject, size: params.message.length });
-      return textResult(`Published to ${params.subject} (${params.message.length} bytes)`);
+      // terminate: the message is delivered, so no follow-up LLM turn is needed.
+      return { ...textResult(`Published to ${params.subject} (${params.message.length} bytes)`), terminate: true };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error("nats_publish failed", { subject: params.subject, error: msg });

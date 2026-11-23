@@ -10,7 +10,7 @@ import { log } from "./logger.js";
 import { natsTools, setKnightName, setNatsPrefix } from "./tools/nats.js";
 import { subagentTools, setParentModel, setParentKnight } from "./tools/subagent.js";
 import { browserTools } from "./tools/browser.js";
-import { setupToolHooks } from "./hooks.js";
+import { toolHooksExtension } from "./hooks.js";
 import { setupCompactionHook, updateSessionNotes } from "./memory.js";
 import { decideRunSession, pruneSessionFiles } from "./sessions.js";
 import { describeSessionFailure, getBestAssistantResult, resolveTaskOutcome, summarizeSessionTail } from "./result-extraction.js";
@@ -122,6 +122,22 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
 
   const thinkingLevel = (config.thinkingLevel ?? "off") as ThinkingLevel;
 
+  // createAgentSession does not reload a caller-supplied loader: reload() is what discovers
+  // skills and loads the inline tool-hook extension.
+  const settingsManager = createTrustedSettingsManager("/data", "/data");
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: "/data",
+    agentDir: "/data",
+    settingsManager,
+    additionalSkillPaths: ["/skills"],
+    noExtensions: true,
+    noThemes: true,
+    noPromptTemplates: true,
+    extensionFactories: [{ name: "knight-tool-hooks", factory: toolHooksExtension, hidden: true }],
+    systemPrompt: buildKnightPreamble(config),
+  });
+  await resourceLoader.reload();
+
   const tCreate = Date.now();
   const { session: newSession } = await createAgentSession({
     model,
@@ -130,21 +146,13 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
     agentDir: "/data",
     modelRuntime,
     // Explicitly trust the project dir; see model.ts.
-    settingsManager: createTrustedSettingsManager("/data", "/data"),
+    settingsManager,
     customTools: [
       ...natsTools,
       ...subagentTools,
       ...(process.env.BROWSER_ENABLED === "true" ? browserTools : []),
     ],
-    resourceLoader: new DefaultResourceLoader({
-      cwd: "/data",
-      agentDir: "/data",
-      additionalSkillPaths: ["/skills"],
-      noExtensions: true,
-      noThemes: true,
-      noPromptTemplates: true,
-      systemPrompt: buildKnightPreamble(config),
-    }),
+    resourceLoader,
   });
 
   const createAgentSessionMs = Date.now() - tCreate;
@@ -160,9 +168,6 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
   // Enable parallel tool execution — agent runs independent tool calls concurrently.
   // Matches the system prompt instruction to maximise parallel tool calls where possible.
   newSession.agent.toolExecution = "parallel";
-
-  // Install tool hooks — safety guardrails, observability, metrics
-  setupToolHooks(newSession);
 
   // Install custom compaction hook — knight-specific context preservation
   setupCompactionHook(newSession, config);
