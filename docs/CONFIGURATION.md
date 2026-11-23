@@ -60,10 +60,12 @@ Knights can evolve their own files over time — ConfigMap seeds the initial sta
 | `MAX_CONCURRENT_TASKS` | Max parallel task execution | `2` |
 
 ### Sessions
-Each chain run gets its own agent session: tasks carrying the operator's `runId`
-(`TaskPayload.RunID`) share one session per run, and a new `runId` starts a fresh
-session so context never bleeds between runs. Tasks without a `runId` (ad-hoc,
-missions) keep reusing the current session. Every session is persisted as a JSONL
+Every task gets a fresh agent session unless it continues a chain run: tasks
+carrying the same operator `runId` (`TaskPayload.RunID`) share one session, while a
+new `runId` — or no `runId` at all (ad-hoc NATS tasks) — starts a fresh session, so
+context never bleeds between tasks. A pristine pre-warmed session is adopted rather
+than recreated. Prior session history is never resumed at startup; long-term memory
+lives in files on the PVC (`MEMORY.md`, `memory/*.md`). Every session is persisted as a JSONL
 file under `/data/sessions`; old files are pruned at startup and on each run change.
 
 | Variable | Description | Default |

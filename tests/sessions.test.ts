@@ -12,9 +12,29 @@ import {
 
 // --- decideRunSession (#31) ---
 
-test("decideRunSession: no runId keeps the current session (ad-hoc / older operator)", () => {
+test("decideRunSession: no runId resets a used session (#53)", () => {
+  for (const currentRunId of ["a", undefined]) {
+    assert.equal(
+      decideRunSession({ runId: undefined, currentRunId, hasSession: true, sessionPristine: false }),
+      "reset",
+    );
+  }
   assert.equal(
-    decideRunSession({ runId: undefined, currentRunId: "a", hasSession: true, sessionPristine: false }),
+    decideRunSession({ runId: "", currentRunId: "", hasSession: true, sessionPristine: false }),
+    "reset",
+  );
+});
+
+test("decideRunSession: no runId adopts a pristine pre-warmed session (#53)", () => {
+  assert.equal(
+    decideRunSession({ runId: undefined, currentRunId: undefined, hasSession: true, sessionPristine: true }),
+    "adopt",
+  );
+});
+
+test("decideRunSession: no runId with no session yet reuses (creates one)", () => {
+  assert.equal(
+    decideRunSession({ runId: undefined, currentRunId: undefined, hasSession: false, sessionPristine: false }),
     "reuse",
   );
 });
