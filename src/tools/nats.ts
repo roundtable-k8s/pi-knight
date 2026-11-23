@@ -105,7 +105,7 @@ export const natsPublishTool = defineTool({
  * IMPORTANT: Only request knights within YOUR OWN table. Cross-table
  * requests will timeout because subjects don't cross table boundaries.
  */
-export const natsRequestTool = defineTool({
+const natsRequestTool = defineTool({
   name: "nats_request",
   label: "Knight Request",
   description: [

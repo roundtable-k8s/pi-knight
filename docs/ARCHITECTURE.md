@@ -36,7 +36,7 @@ Pi-Knight is a purpose-built agent harness built on Pi's layered SDK. Every knig
 | Context Management | Built-in context compaction |
 | Skill System | Pi's native agentskills.io loader (built-in) |
 | Model Flexibility | OpenRouter, Anthropic, OpenAI, Gemini, Ollama, 2000+ models |
-| Extension System | Pi extensions for lifecycle hooks |
+| Extension System | Pi extensions (inline tool-hook extension: safety guardrails, secret redaction, metrics) |
 | Cost | Cheap fleet default, right-size per knight via `KNIGHT_MODEL` |
 
 ## Layer Map

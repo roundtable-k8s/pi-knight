@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseSessionFile, previewText, recentItemsForEntry, summarizeEntry, summarizeSession } from "../src/introspect-format.ts";
 
-// Shapes below mirror @earendil-works/pi-ai 0.79.1 exactly (verified against a
+// Shapes below mirror @earendil-works/pi-ai exactly (verified against a
 // live agravain session): assistant tool calls are `type: "toolCall"` blocks;
 // tool results are their own `role: "toolResult"` messages; usage lives under
 // `usage.input/output` and `usage.cost.total`.
