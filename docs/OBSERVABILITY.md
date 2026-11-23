@@ -40,7 +40,7 @@ All logs are JSON, compatible with Loki/Promtail ingestion on the dapper-cluster
 - `nats.disconnected` — NATS connection lost
 - `nats.reconnected` — NATS connection restored
 - `task.received` — Task message consumed from JetStream
-- `task.acked` — Message acknowledged (before execution)
+- `task.acked` — Message acknowledged (after the task finishes and its result is published)
 - `task.started` — Pi agent loop invoked
 - `task.tool_call` — Individual tool invocation (name, duration)
 - `task.skill_activated` — Skill matched and loaded

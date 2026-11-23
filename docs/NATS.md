@@ -96,8 +96,10 @@ Use for: asking another knight a question, delegating subtasks, gathering cross-
 - **Task stream**: `fleet_a_tasks` — subjects `fleet-a.tasks.>`
 - **Result stream**: `fleet_a_results` — subjects `fleet-a.results.>`
 - **Consumer**: `<knight-name>-consumer` (durable, per-knight)
-- **Ack policy**: Explicit, immediate ack (at-most-once delivery)
-- **Max deliver**: 1 (no redelivery — tasks are acked before execution)
+- **Delivery**: pull consumer. The knight fetches at most `MAX_CONCURRENT_TASKS - active` messages, so backlog stays in the stream (consumer lag is real; KEDA can scale on it). There is no in-memory overflow queue.
+- **Ack policy**: Explicit. The message is acked when the task *finishes* (after the result is published). While it runs the knight sends an in-progress ack (`working()`) every 10s.
+- **Ack wait**: 30s heartbeat window (not the task timeout).
+- **Max deliver**: 1. **Redelivery policy:** a task is never re-run silently. If a knight takes a task and dies/hangs without acking, the server stops after the ack window and emits a `MAX_DELIVERIES` advisory; a live knight replica (queue group, so exactly one) reads the original message by stream sequence and publishes a failure result (`success: false`, `lost: true`). Limitation: the advisory is core-NATS, so it is missed if *no* replica of that knight is running when the ack window expires (30s after the crash).
 
 ## Session Persistence
 
