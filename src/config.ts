@@ -9,6 +9,8 @@ export interface KnightConfig {
   natsResultsStream: string;
   natsResultsPrefix: string;
   taskTimeoutMs: number;
+  /** Max wait for in-flight tasks after SIGTERM. Default taskTimeoutMs + 60s, matching the operator's terminationGracePeriodSeconds. */
+  drainTimeoutMs: number;
   maxConcurrentTasks: number;
   metricsPort: number;
   logLevel: string;
@@ -42,6 +44,7 @@ export function loadConfig(): KnightConfig {
     natsResultsStream: process.env["NATS_RESULTS_STREAM"] ?? "fleet_a_results",
     natsResultsPrefix: process.env["NATS_RESULTS_PREFIX"] ?? "fleet-a.results",
     taskTimeoutMs: parseInt(process.env["TASK_TIMEOUT_MS"] ?? "1800000", 10),
+    drainTimeoutMs: parseInt(process.env["DRAIN_TIMEOUT_MS"] ?? String(parseInt(process.env["TASK_TIMEOUT_MS"] ?? "1800000", 10) + 60_000), 10),
     maxConcurrentTasks: parseInt(process.env["MAX_CONCURRENT_TASKS"] ?? "2", 10),
     metricsPort: parseInt(process.env["METRICS_PORT"] ?? "3000", 10),
     logLevel: process.env["LOG_LEVEL"] ?? "info",

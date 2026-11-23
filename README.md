@@ -80,3 +80,10 @@ Pi-Knight uses Pi's SDK directly — native API calls, no CLI subprocess, no pro
 ## License
 
 MIT
+
+## Draining on rollout
+
+On `SIGTERM` the knight stops fetching new tasks, `/ready` returns 503 (`"status": "draining"`) so the pod
+leaves Service endpoints, and in-flight tasks keep heartbeating until they publish their result and ack.
+It then exits. The wait is bounded by `DRAIN_TIMEOUT_MS` (default `TASK_TIMEOUT_MS` + 60s, matching the
+operator's `terminationGracePeriodSeconds`); the kubelet SIGKILLs after the pod grace period regardless.

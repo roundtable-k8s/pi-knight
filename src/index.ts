@@ -1,7 +1,8 @@
 import { loadConfig } from "./config.js";
 import { initLogger, log } from "./logger.js";
 import { connectNats, subscribe, publishResult, drain, HEARTBEAT_MS, type TaskDelivery } from "./nats.js";
-import { startHealthServer, stopHealthServer, setSkillCount, setActiveTaskCount, setDegradedReason } from "./health.js";
+import { waitForInflight } from "./drain.js";
+import { startHealthServer, stopHealthServer, setSkillCount, setActiveTaskCount, setDegradedReason, setDraining } from "./health.js";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { executeTask, getActiveSessions, pruneOldSessions, warmSession } from "./knight.js";
 import { startIntrospect } from "./introspect.js";
@@ -190,16 +191,15 @@ async function main(): Promise<void> {
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
-    log.info("Shutdown signal received", { signal });
+    if (shuttingDown) return;
+    log.info("Shutdown signal received — draining", { signal, activeCount });
     shuttingDown = true;
+    setDraining(true); // /ready -> 503 so the pod leaves Service endpoints
+    await puller?.stop(); // no new fetches; in-flight tasks keep heartbeating
 
-    const maxWait = 60_000;
-    const start = Date.now();
-    while (activeCount > 0 && Date.now() - start < maxWait) {
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-    if (activeCount > 0) {
-      log.warn("Forcing shutdown with active tasks", { activeCount });
+    const left = await waitForInflight({ getActive: () => activeCount, maxWaitMs: config.drainTimeoutMs });
+    if (left > 0) {
+      log.warn("Forcing shutdown with active tasks", { activeCount: left });
     }
 
     // Dispose the session to abort any in-flight agent/compaction/retry/bash work
