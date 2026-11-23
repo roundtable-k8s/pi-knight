@@ -29,7 +29,9 @@ export interface TaskResult {
   toolCalls: number;
 }
 
-// Persistent session — reused across tasks within a chain run
+// Live session — reused only across tasks of the same chain run (runId); every other
+// task gets a fresh one (#53). Not resumed from PVC history at startup either:
+// createAgentSession is given no sessionManager, so pi creates a new session file.
 let session: AgentSession | null = null;
 
 // In-flight session creation, so a task arriving during startup pre-warm awaits the
@@ -41,7 +43,7 @@ let sessionCreating: Promise<AgentSession> | null = null;
 let sessionUsed = false;
 
 // The chain runId the current session belongs to. A task whose runId differs starts a
-// fresh session to prevent cross-run context bleed; tasks without a runId reuse it. (#31)
+// fresh session to prevent cross-run context bleed, and so does a task without a runId. (#31, #53)
 let currentRunId: string | undefined;
 
 /** Get the active session (or null if not yet created). Used by introspect. */
@@ -99,12 +101,28 @@ let promptLock: Promise<void> = Promise.resolve();
 async function getSession(config: KnightConfig): Promise<AgentSession> {
   if (session) return session;
   if (sessionCreating) return sessionCreating;
-  sessionCreating = createSession(config);
+  sessionCreating = sessionFactory(config);
   try {
-    return await sessionCreating;
+    const created = await sessionCreating;
+    session = created;
+    sessionUsed = false;
+    return created;
   } finally {
     sessionCreating = null;
   }
+}
+
+// Seam so tests can exercise executeTask without a real model/SDK session.
+let sessionFactory: (config: KnightConfig) => Promise<AgentSession> = (c) => createSession(c);
+/** @internal test-only: replace session creation and reset module session state. */
+export function __setSessionFactoryForTests(
+  f: ((config: KnightConfig) => Promise<AgentSession>) | null,
+): void {
+  sessionFactory = f ?? ((c) => createSession(c));
+  session = null;
+  sessionCreating = null;
+  sessionUsed = false;
+  currentRunId = undefined;
 }
 
 async function createSession(config: KnightConfig): Promise<AgentSession> {
@@ -207,17 +225,16 @@ async function createSession(config: KnightConfig): Promise<AgentSession> {
     totalMs: Date.now() - tStart,
   });
 
-  session = newSession;
-  sessionUsed = false;
   return newSession;
 }
 
 /**
  * Execute a task on the persistent session.
  *
- * Each task is a new prompt() on the same session — the knight
- * remembers context from previous tasks within the session lifetime.
- * Pi SDK auto-compacts when context grows too large.
+ * Tasks of one chain run (same runId) are prompts on the same session and share
+ * context. A task without a runId, or with a different one, starts a fresh session
+ * (#53) — cross-task memory lives in files on the PVC. Pi SDK auto-compacts when
+ * context grows too large.
  */
 export async function executeTask(
   task: string,
@@ -231,9 +248,10 @@ export async function executeTask(
   promptLock = new Promise((resolve) => { releaseLock = resolve; });
   await prevLock;
 
-  // Start a fresh session when a new chain run begins (#31). This runs inside the
-  // serialized region so it can't race a concurrent task's prompt. runId is optional:
-  // ad-hoc/mission tasks (and older operators) omit it and keep reusing the session.
+  // Start a fresh session unless this task continues the current chain run (#31, #53).
+  // This runs inside the serialized region so it can't race a concurrent task's prompt.
+  // runId is optional and ad-hoc tasks never carry one — they get a fresh session each,
+  // otherwise unrelated tasks pile into one ever-growing, cross-contaminated session.
   // A pristine session (never prompted, no PVC history) has no context to bleed and is
   // adopted instead — this is what keeps startup pre-warming effective.
   const action = decideRunSession({
@@ -243,12 +261,12 @@ export async function executeTask(
     sessionPristine: session !== null && !sessionUsed && session.getSessionStats().totalMessages === 0,
   });
   if (action === "adopt") {
-    log.info("Adopting pre-warmed unused session for new chain run", {
+    log.info("Adopting pre-warmed unused session for new task", {
       previousRunId: currentRunId ?? null,
       runId,
     });
   } else if (action === "reset" && session) {
-    log.info("New chain run — starting a fresh agent session to avoid context bleed", {
+    log.info("New run or run-less task — starting a fresh agent session to avoid context bleed", {
       previousRunId: currentRunId ?? null,
       runId,
     });
@@ -259,7 +277,7 @@ export async function executeTask(
     }
     session = null;
   }
-  if (runId) currentRunId = runId;
+  currentRunId = runId || undefined;
 
   let sess: AgentSession;
   try {

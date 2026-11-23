@@ -1,9 +1,11 @@
 /**
- * Session lifecycle helpers: per-chain-run session keying and on-disk retention.
+ * Session lifecycle helpers: per-task/per-run session keying and on-disk retention.
  *
  * A knight holds exactly one live AgentSession in memory. Chain tasks carry the
- * operator-assigned run id (TaskPayload.RunID, JSON `runId`); a task from a new run
- * gets a fresh session so context never bleeds between runs (#31). Every fresh
+ * operator-assigned run id (TaskPayload.RunID, JSON `runId`); steps of one run share a
+ * session, and a task from a new run gets a fresh one so context never bleeds between
+ * runs (#31). Tasks without a runId (ad-hoc NATS tasks) each get a fresh session too
+ * (#53); long-term memory lives in files on the PVC, not in the live session. Every fresh
  * session the pi SDK persists becomes a JSONL file under <agentDir>/sessions, so
  * per-run sessions would grow the PVC without bound — pruneSessionFiles caps that.
  */
@@ -15,20 +17,22 @@ import { join } from "node:path";
 export const SESSIONS_ROOT = process.env.KNIGHT_SESSIONS_ROOT ?? "/data/sessions";
 
 export type RunSessionAction =
-  /** Keep using the current session (same run, no run id, or no session yet). */
+  /** Keep using the current session (same run id, or no session yet). */
   | "reuse"
-  /** New run, but the current session was never prompted — take it over as-is. */
+  /** New run or run-less task, but the current session was never prompted — take it over as-is. */
   | "adopt"
-  /** New run with a used session — dispose it and start a fresh one. */
+  /** New run or run-less task with a used session — dispose it and start a fresh one. */
   | "reset";
 
 /**
  * Decide what to do with the live session when a task arrives.
  *
- * - No runId (ad-hoc/mission tasks, older operators): reuse — the pre-#31 behaviour.
+ * - No session yet: reuse (one is created).
  * - Same runId as the current session: reuse — steps of one chain run share context.
- * - Different runId: reset, unless the session is pristine (never prompted, no
- *   history), in which case adopting it is equivalent and keeps startup pre-warm useful.
+ * - Different runId, or no runId at all (ad-hoc tasks never carry one): reset, so
+ *   unrelated tasks never share context (#53). Exception: a pristine session (never
+ *   prompted, no history) is adopted instead — equivalent, and keeps startup pre-warm
+ *   useful.
  */
 export function decideRunSession(opts: {
   runId: string | undefined;
@@ -37,7 +41,7 @@ export function decideRunSession(opts: {
   sessionPristine: boolean;
 }): RunSessionAction {
   const { runId, currentRunId, hasSession, sessionPristine } = opts;
-  if (!runId || runId === currentRunId || !hasSession) return "reuse";
+  if (!hasSession || (runId !== undefined && runId !== "" && runId === currentRunId)) return "reuse";
   return sessionPristine ? "adopt" : "reset";
 }
 
