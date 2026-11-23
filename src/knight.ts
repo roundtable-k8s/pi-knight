@@ -16,6 +16,7 @@ import { browserTools } from "./tools/browser.js";
 import { toolHooksExtension } from "./hooks.js";
 import { setupCompactionHook, updateSessionNotes } from "./memory.js";
 import { pruneSessionFiles } from "./sessions.js";
+import { extractStructured, type PRRef, type Verdict } from "./structured.js";
 import { describeSessionFailure, getBestAssistantResult, resolveTaskOutcome, summarizeSessionTail } from "./result-extraction.js";
 
 
@@ -30,6 +31,10 @@ export interface TaskResult {
   tokens: { input: number; output: number; cacheRead: number };
   model: string;
   toolCalls: number;
+  /** Pull requests this task opened or updated (omitted when none). */
+  prs?: PRRef[];
+  /** Review verdict from a final "Verdict:" line (omitted when none). */
+  verdict?: Verdict;
 }
 
 /**
@@ -333,6 +338,7 @@ export async function executeTask(
 
   // Snapshot stats before this task
   const statsBefore = sess.getSessionStats();
+  const messagesBefore = (sess as unknown as { messages?: unknown[] }).messages?.length ?? 0;
   const costBefore = statsBefore.cost;
   const toolCallsBefore = statsBefore.toolCalls;
   const tokensBefore = {
@@ -423,6 +429,10 @@ export async function executeTask(
     });
   }
 
+  // Structured prs/verdict, from only this task's messages (the session is shared per run).
+  const taskMessages = ((sess as unknown as { messages?: unknown[] }).messages ?? []).slice(messagesBefore);
+  const structured = success ? extractStructured(taskMessages, resultText) : { prs: [] as PRRef[] };
+
   // Update session notes after each task (fire-and-forget)
   updateSessionNotes(config.knightName, task, resultText).catch((err) => {
     log.warn("Failed to update session notes", { error: String(err) });
@@ -450,6 +460,8 @@ export async function executeTask(
     tokens: taskTokens,
     model: modelUsed,
     toolCalls: taskToolCalls,
+    ...(structured.prs.length > 0 ? { prs: structured.prs } : {}),
+    ...(structured.verdict ? { verdict: structured.verdict } : {}),
   };
 }
 

@@ -116,6 +116,8 @@ async function main(): Promise<void> {
         tokens: result.tokens,
         model: result.model,
         tool_calls: result.toolCalls,
+        ...(result.prs ? { prs: result.prs } : {}),
+        ...(result.verdict ? { verdict: result.verdict } : {}),
         timestamp: new Date().toISOString(),
       });
 
