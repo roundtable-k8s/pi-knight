@@ -123,6 +123,27 @@ export const toolHooksExtension: ExtensionFactory = (pi) => {
     return { content };
   });
 
+  // Log model/token metadata for each LLM call (payload is passed through unmodified).
+  pi.on("before_provider_request", (event, ctx) => {
+    try {
+      const p = event.payload as any;
+      log.info("LLM request payload", {
+        model: ctx.model?.id ?? "unknown",
+        provider: ctx.model?.provider ?? "unknown",
+        messageCount: Array.isArray(p?.messages) ? p.messages.length : undefined,
+        toolCount: Array.isArray(p?.tools) ? p.tools.length : 0,
+        toolNames: Array.isArray(p?.tools) ? p.tools.map((t: any) => t?.function?.name ?? t?.name).filter(Boolean) : [],
+        hasToolChoice: p?.tool_choice !== undefined,
+        maxTokens: p?.max_tokens ?? p?.max_completion_tokens,
+        stream: p?.stream,
+      });
+      log.debug("LLM request payload (full)", { payload: p });
+    } catch (err) {
+      log.warn("before_provider_request hook threw", { error: String(err) });
+    }
+    return undefined;
+  });
+
   // Fires for every finalized call (including blocked ones), with a monotonic duration.
   pi.on("tool_execution_end", (event) => {
     const duration = event.durationMs ?? 0;
