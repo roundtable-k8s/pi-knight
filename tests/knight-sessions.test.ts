@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeTask, workspaceName, __setSessionFactoryForTests, __setTaskModelResolverForTests } from "../src/knight.ts";
@@ -143,7 +143,11 @@ test("executeTask: tasks of different runs overlap in time, with separate sessio
   assert.equal(created.length, 3);
   for (const s of created) assert.equal(s.messages.length, 2, "no message sharing");
   assert.equal(new Set(cwds).size, 3);
-  assert.deepEqual(cwds.map((d) => d.split("/").pop()).sort(), ["run-run-a", "run-run-b", "task-t3"]);
+  assert.deepEqual(
+    cwds.map((d) => d.split("/").pop()).sort(),
+    [workspaceName("run-a", "t1"), workspaceName("run-b", "t2"), workspaceName(undefined, "t3")].sort(),
+  );
+  assert.match(cwds.map((d) => d.split("/").pop()).sort()[0], /^run-run-a-[0-9a-f]{8}$/);
   for (const d of cwds) assert.ok(!existsSync(d), "workspace removed after the task");
   __setSessionFactoryForTests(null);
 });
@@ -194,9 +198,30 @@ test("executeTask: a run-less taskId never shares a workspace with a run of the 
     executeTask("b", config, undefined, undefined, "same"),
   ]);
   assert.equal(new Set(cwds).size, 2);
-  assert.equal(workspaceName("same", "x"), "run-same");
-  assert.equal(workspaceName(undefined, "same"), "task-same");
+  assert.match(workspaceName("same", "x"), /^run-same-[0-9a-f]{8}$/);
+  assert.match(workspaceName(undefined, "same"), /^task-same-[0-9a-f]{8}$/);
+  assert.notEqual(workspaceName("same", "x"), workspaceName(undefined, "same"));
   __setSessionFactoryForTests(null);
+});
+
+test("workspaceName: ids that sanitise to the same characters get different directories", () => {
+  assert.notEqual(workspaceName("a/b", "x"), workspaceName("a_b", "x"));
+  assert.notEqual(workspaceName("a b", "x"), workspaceName("a_b", "x"));
+  assert.notEqual(workspaceName(undefined, "a/b"), workspaceName(undefined, "a_b"));
+});
+
+test("workspaceName: the same id always maps to the same directory", () => {
+  assert.equal(workspaceName("a/b", "x"), workspaceName("a/b", "y"));
+  assert.equal(workspaceName(undefined, "t/1"), workspaceName(undefined, "t/1"));
+});
+
+test("workspaceName: length stays bounded and names are filesystem-safe", () => {
+  const long = workspaceName("r".repeat(1000) + "/", "x");
+  assert.ok(long.length <= 120, `length ${long.length}`);
+  assert.match(long, /^run-r{100}-[0-9a-f]{8}$/);
+  assert.match(workspaceName("../../etc/passwd", "x"), /^run-\.\._\.\._etc_passwd-[0-9a-f]{8}$/);
+  assert.match(workspaceName(undefined, "é"), /^task-_-[0-9a-f]{8}$/);
+  assert.match(workspaceName("", ""), /^task-x-[0-9a-f]{8}$/);
 });
 
 test("executeTask: a failed session creation does not wedge the run", async () => {
@@ -208,6 +233,26 @@ test("executeTask: a failed session creation does not wedge the run", async () =
   await assert.rejects(executeTask("a", config, undefined, "run-f", "t1"), /boom/);
   const r = await executeTask("b", config, undefined, "run-f", "t2");
   assert.equal(r.success, true);
+  __setSessionFactoryForTests(null);
+});
+
+test("executeTask: a failed session creation removes its workspace before a queued step starts", async () => {
+  let n = 0;
+  let staleSeenByNext: boolean | undefined;
+  __setSessionFactoryForTests(async (_cfg, cwd) => {
+    if (n++ === 0) {
+      // Leave a file behind, then fail: the successor must not inherit it.
+      writeFileSync(join(cwd, "stale"), "x");
+      throw new Error("boom");
+    }
+    staleSeenByNext = existsSync(join(cwd, "stale"));
+    return fakeSession(1, []) as any;
+  });
+  const first = executeTask("a", config, undefined, "run-q", "t1");
+  const second = executeTask("b", config, undefined, "run-q", "t2");
+  await assert.rejects(first, /boom/);
+  assert.equal((await second).success, true);
+  assert.equal(staleSeenByNext, false, "queued step got a fresh workspace");
   __setSessionFactoryForTests(null);
 });
 
