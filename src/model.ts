@@ -26,17 +26,28 @@ const MODELS_JSON = process.env.MODELS_JSON_PATH || "/data/models.json";
  */
 export const DEFAULT_MAX_OUTPUT_TOKENS = 32768;
 
-/** One-time startup log guard so the effective cap is logged once per process. */
-let loggedMaxOutputTokens = false;
+/** One-time startup log guard so the effective cap is logged once per distinct provider/model. */
+const loggedMaxOutputTokens = new Set<string>();
+let warnedBadMaxTokens = false;
 
 /**
  * Effective per-request output-token cap for a model: MODEL_MAX_TOKENS if set,
  * otherwise DEFAULT_MAX_OUTPUT_TOKENS, and never above the model's own limit.
  */
 export function outputTokenCap(modelLimit?: number): number {
-  const configured = process.env.MODEL_MAX_TOKENS
-    ? parseInt(process.env.MODEL_MAX_TOKENS, 10)
-    : DEFAULT_MAX_OUTPUT_TOKENS;
+  let configured = DEFAULT_MAX_OUTPUT_TOKENS;
+  const raw = process.env.MODEL_MAX_TOKENS;
+  if (raw) {
+    // Strict integer parse: "32k"/"abc" must not become NaN (which would silently drop
+    // max_tokens from requests and re-open #79) or a truncated "32".
+    const parsed = /^\s*\d+\s*$/.test(raw) ? parseInt(raw, 10) : NaN;
+    if (Number.isSafeInteger(parsed) && parsed > 0) {
+      configured = parsed;
+    } else if (!warnedBadMaxTokens) {
+      warnedBadMaxTokens = true;
+      log.warn("Invalid MODEL_MAX_TOKENS; falling back to default", { value: raw, fallback: DEFAULT_MAX_OUTPUT_TOKENS });
+    }
+  }
   return typeof modelLimit === "number" && Number.isFinite(modelLimit) && modelLimit > 0
     ? Math.min(configured, modelLimit)
     : configured;
@@ -174,9 +185,9 @@ export async function resolveModel(
       LOCAL_PROVIDER_BASE_URLS[provider] ||
       "http://localhost:4000/v1";
     const contextWindow = parseInt(process.env.MODEL_CONTEXT_WINDOW ?? "131072", 10);
-    // Output cap for custom models: MODEL_MAX_TOKENS if set, otherwise the shared
-    // default — never above the context-derived limits. Same helper as registry models (#79).
-    const maxTokens = outputTokenCap(parseInt(process.env.MODEL_MAX_TOKENS ?? String(DEFAULT_MAX_OUTPUT_TOKENS), 10));
+    // Output cap for custom models: MODEL_MAX_TOKENS if set (and valid), otherwise the
+    // shared default. pi-ai clamps max_tokens to remaining context room per request (#79).
+    const maxTokens = outputTokenCap();
     // Reasoning is off by default (most local chat models), but opt-in for reasoning
     // models served locally (e.g. gpt-oss) so pi surfaces their thinking instead of
     // letting it ride along in an unparsed side field. Set MODEL_REASONING=true.
@@ -223,8 +234,9 @@ export async function resolveModel(
   // limit (e.g. 900k) made every call unaffordable while small replies were fine (#79).
   const modelLimit = (model as { maxTokens?: number }).maxTokens;
   const effectiveMaxTokens = outputTokenCap(modelLimit);
-  if (!loggedMaxOutputTokens) {
-    loggedMaxOutputTokens = true;
+  const capKey = `${provider}/${model.id}`;
+  if (!loggedMaxOutputTokens.has(capKey)) {
+    loggedMaxOutputTokens.add(capKey);
     log.info("Effective max_tokens for model", {
       model: `${provider}/${model.id}`,
       maxTokens: effectiveMaxTokens,

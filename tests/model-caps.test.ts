@@ -89,3 +89,13 @@ test("resolveModel leaves a registry model below the cap untouched", async () =>
     assert.equal((m as { maxTokens?: number }).maxTokens, 4096, "model's own smaller limit preserved");
   });
 });
+
+test("outputTokenCap falls back to the default for a malformed MODEL_MAX_TOKENS (never NaN)", async () => {
+  for (const bad of ["32k", "abc", "0", "-5", "1.5"]) {
+    await withEnv({ MODEL_MAX_TOKENS: bad }, async () => {
+      assert.equal(outputTokenCap(937632), 32768, `${bad} → default`);
+      assert.equal(outputTokenCap(undefined), 32768, `${bad} → default, no model limit`);
+      assert.equal(outputTokenCap(4096), 4096, `${bad} → still bounded by the model limit`);
+    });
+  }
+});
