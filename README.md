@@ -101,3 +101,5 @@ On `SIGTERM` the knight stops fetching new tasks, `/ready` returns 503 (`"status
 leaves Service endpoints, and in-flight tasks keep heartbeating until they publish their result and ack.
 It then exits. The wait is bounded by `DRAIN_TIMEOUT_MS` (default `TASK_TIMEOUT_MS` + 60s, matching the
 operator's `terminationGracePeriodSeconds`); the kubelet SIGKILLs after the pod grace period regardless.
+
+A task can set its own `timeoutMs` (`timeout_ms` in the NATS metadata), which overrides `TASK_TIMEOUT_MS` for that task only. A task whose override is longer than `DRAIN_TIMEOUT_MS` can outlive the drain bound. At the deadline the knight aborts still-running tasks and gives them a short grace period to publish a failure result, but the kubelet SIGKILL at the pod grace period can arrive first, in which case that result is never published.

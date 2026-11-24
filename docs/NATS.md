@@ -101,6 +101,8 @@ Use for: asking another knight a question, delegating subtasks, gathering cross-
 - **Ack wait**: 30s heartbeat window (not the task timeout).
 - **Max deliver**: 1. **Redelivery policy:** a task is never re-run silently. If a knight takes a task and dies/hangs without acking, the server stops after the ack window and emits a `MAX_DELIVERIES` advisory; a live knight replica (queue group, so exactly one) reads the original message by stream sequence and publishes a failure result (`success: false`, `lost: true`). Limitation: the advisory is core-NATS, so it is missed if *no* replica of that knight is running when the ack window expires (30s after the crash).
 
+Second limitation (spurious `lost` result): an event-loop stall longer than the ack window (30s, e.g. an extreme GC pause) can fire the `MAX_DELIVERIES` advisory while the task is still running. The live replica then publishes a `success: false, lost: true` result for a task that is in fact still executing, and the real result follows later. The task is never re-run, but consumers can see two results for one `taskId`. Consumers should prefer the later result that is not `lost` for the same `taskId`.
+
 ## Session Persistence
 
 Knights maintain **persistent sessions** across tasks. When a knight processes multiple tasks, it retains context from previous work. Pi SDK handles auto-compaction when context grows too large.
