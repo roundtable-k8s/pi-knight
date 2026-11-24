@@ -122,7 +122,9 @@ description: "Query OpenCTI threat intelligence platform for STIX objects, indic
 Category filtering happens in the **skill-filter sidecar**, not in pi-knight:
 only the categories listed in the Knight's `spec.skills` are linked into `/skills`,
 and Pi SDK's `loadSkills()` then loads everything it finds there. The operator also
-exposes the list as `KNIGHT_SKILLS` in the knight's ConfigMap; the runtime does not
-read it.
+exposes the list as `KNIGHT_SKILLS` in the knight's ConfigMap (mounted at
+`/config/KNIGHT_SKILLS`). The runtime reads it only at start-up: when it is present and
+empty (no categories), pi-knight skips the ~60s wait for skills to sync and logs that it
+did; otherwise it polls as before.
 
 The agent's system prompt and personality (SOUL.md) guide it to stay within its domain.

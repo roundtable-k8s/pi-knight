@@ -3,6 +3,7 @@ import { initLogger, log } from "./logger.js";
 import { connectNats, subscribe, publishResult, drain, HEARTBEAT_MS, type TaskDelivery } from "./nats.js";
 import { createShutdown, installSignalHandlers } from "./drain.js";
 import { startHealthServer, stopHealthServer, setSkillCount, setActiveTaskCount, setDegradedReason, setDraining } from "./health.js";
+import { skillsExpected, waitForSkills } from "./skill-wait.js";
 import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { executeTask, getActiveSessions, pruneOldSessions, warmSession } from "./knight.js";
 import { startIntrospect } from "./introspect.js";
@@ -41,31 +42,30 @@ async function main(): Promise<void> {
 
   // Discover skills using Pi SDK's built-in agentskills.io loader
   // Retry for git-sync race at startup
-  let skillCount = 0;
-  const maxSkillAttempts = 20; // ~60s total — allows git-sync + skill-filter to complete
-  for (let attempt = 0; attempt < maxSkillAttempts; attempt++) {
-    const { skills, diagnostics } = loadSkills({
-      cwd: "/data",
-      agentDir: "/config",
-      skillPaths: ["/skills"],
-      includeDefaults: true,
-    });
-    skillCount = skills.length;
-    if (skillCount > 0) {
-      log.info("Skills loaded (Pi SDK)", {
-        count: skillCount,
-        names: skills.map((s) => s.name),
+  const skillCount = await waitForSkills({
+    maxAttempts: 20, // ~60s total — allows git-sync + skill-filter to complete
+    intervalMs: 3000,
+    expected: skillsExpected(),
+    info: (msg, data) => log.info(msg, data),
+    load: () => {
+      const { skills, diagnostics } = loadSkills({
+        cwd: "/data",
+        agentDir: "/config",
+        skillPaths: ["/skills"],
+        includeDefaults: true,
       });
-      for (const d of diagnostics) {
-        if (d.type === "warning") log.warn("Skill diagnostic", { message: d.message, path: d.path });
+      if (skills.length > 0) {
+        log.info("Skills loaded (Pi SDK)", {
+          count: skills.length,
+          names: skills.map((s) => s.name),
+        });
+        for (const d of diagnostics) {
+          if (d.type === "warning") log.warn("Skill diagnostic", { message: d.message, path: d.path });
+        }
       }
-      break;
-    }
-    if (attempt < maxSkillAttempts - 1) {
-      log.info("No skills found, waiting for git-sync...", { attempt: attempt + 1 });
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-  }
+      return skills.length;
+    },
+  });
   setSkillCount(skillCount);
 
   // Pre-warm the agent session in the background (after skills so the session
