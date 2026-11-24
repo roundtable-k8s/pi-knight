@@ -53,6 +53,20 @@ export OPENROUTER_API_KEY=sk-or-...
 npm run dev
 ```
 
+### Pinned toolchain (Nix)
+
+`flake.nix` pins nixpkgs and provides the same Node 22, npm, git, gh and jq
+that CI and the knight tools image use:
+
+```bash
+nix develop                          # shell with node/npm/git/gh/jq on PATH
+nix build .#knight-tools             # buildEnv of the same tools (result/bin)
+nix flake check                      # knight-tools has every tool and node 22
+```
+
+Inside `nix develop`, the CI steps are `npm ci`, `npx tsc --noEmit`, `npm test`
+and `npm run build`.
+
 ## Knights
 
 | Knight | Domain | Skills |
