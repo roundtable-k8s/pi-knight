@@ -106,3 +106,18 @@ Use for: asking another knight a question, delegating subtasks, gathering cross-
 Knights maintain **persistent sessions** across tasks. When a knight processes multiple tasks, it retains context from previous work. Pi SDK handles auto-compaction when context grows too large.
 
 Session data persists to `/data` (PVC) as JSONL files, surviving pod restarts.
+
+## Task activity events and introspection
+
+Each task publishes core-NATS (not JetStream) events on `<prefix>.activity.<Knight>.<taskId>`:
+`task.started` (`slot`, `concurrency`, `queuedFor`), `task.heartbeat` (every 10 s: `turns`, `tokens`,
+`cost`, `currentTool`), `tool.started` / `tool.finished`, `assistant.message`, `task.finished`.
+Common fields: `v`, `type`, `ts`, `knight`, `pod`, `node`, `taskId`, `runId`, `chainName`, `stepName`,
+`model`, `seq` (per task; a gap means dropped events). Previews are redacted, then cut to 500 chars
+(argument summaries 200); events are capped at 8 KiB; tool/assistant events are limited to 20/s per task
+(lifecycle events and heartbeats are never dropped). Publish failures never fail a task.
+
+Introspection is served on `<prefix>.introspect.<Knight>` (queue group: one replica answers) and
+`<prefix>.introspect.<Knight>.<pod>` (a specific replica). Every reply carries `pod` and `node`;
+`stats` reports the real `runtime.activeTasks` and an `inflight` list; `stats`/`recent`/`tree` accept
+`runId` or `sessionId` to pick a live session instead of the most recent one.

@@ -26,6 +26,9 @@ export interface ParsedTask {
   /** Chain run identity (operator-assigned UUID). Used to start a fresh agent session
    *  per run and avoid cross-run context bleed. Optional — absent for ad-hoc tasks. (#31) */
   runId?: string;
+  /** Chain / step names from the operator's TaskPayload (activity events, introspection). */
+  chainName?: string;
+  stepName?: string;
   /** Optional per-task model override ("provider/model"); applies to this task only. */
   model?: string;
 }
@@ -67,6 +70,8 @@ export function parseTaskPayload(raw: string, subjectTaskId: string): ParsedTask
       // tick; normalize it to undefined so the knight's configured timeout applies. (#30)
       timeoutMs: normalizeTimeoutMs(json.metadata?.timeout_ms ?? json.metadata?.timeoutMs),
       runId: normalizeRunId(json.runId ?? json.run_id),
+      chainName: typeof (json.chainName ?? json.chain_name) === "string" ? (json.chainName ?? json.chain_name) : undefined,
+      stepName: typeof (json.stepName ?? json.step_name) === "string" ? (json.stepName ?? json.step_name) : undefined,
       model: typeof json.model === "string" && json.model.trim() ? json.model.trim() : undefined,
     };
   } catch {

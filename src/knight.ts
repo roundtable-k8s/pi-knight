@@ -13,6 +13,7 @@ import { log } from "./logger.js";
 import { natsTools, setKnightName, setNatsPrefix } from "./tools/nats.js";
 import { subagentTools, setParentModel, setParentKnight } from "./tools/subagent.js";
 import { browserTools } from "./tools/browser.js";
+import type { TaskActivity } from "./activity.js";
 import { toolHooksExtension } from "./hooks.js";
 import { setupCompactionHook, updateSessionNotes } from "./memory.js";
 import { pruneSessionFiles } from "./sessions.js";
@@ -65,6 +66,19 @@ const MIN_SESSIONS = 8;
 /** Get the most recently used session (or null). Used by introspect. */
 export function getActiveSession(): AgentSession | null {
   return lastActive?.session ?? null;
+}
+
+/**
+ * Find a live session by run id (also matches a run-less task's id) or by pi session id.
+ * Used by introspect `recent`/`tree` so a request can target one run instead of "most recent".
+ */
+export function findSession(sel: { runId?: string; sessionId?: string }): AgentSession | null {
+  for (const slot of slots.values()) {
+    if (!slot.session) continue;
+    if (sel.runId && (slot.key === `run:${sel.runId}` || slot.key === `task:${sel.runId}`)) return slot.session;
+    if (sel.sessionId && slot.session.getSessionStats().sessionId === sel.sessionId) return slot.session;
+  }
+  return null;
 }
 
 /** All live sessions, for shutdown. */
@@ -288,7 +302,7 @@ export async function executeTask(
   signal?: AbortSignal,
   runId?: string,
   taskId?: string,
-  opts: { model?: string } = {},
+  opts: { model?: string; activity?: TaskActivity } = {},
 ): Promise<TaskResult> {
   // Same runId → same session, queued behind that run's earlier steps; anything else
   // runs on its own session, concurrently. Run-less tasks never share one (#31, #53).
@@ -371,9 +385,11 @@ export async function executeTask(
         throw new Error(`Cannot use model "${taskModel}": ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    opts.activity?.attach(sess);
     await sess.prompt(task);
     promptFailed = false;
   } finally {
+    opts.activity?.detach();
     if (defaultModel) {
       await sess.setModel(defaultModel).catch((err) => {
         log.warn("Failed to restore knight default model after task", { error: String(err) });

@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { log } from "./logger.js";
 import { getConnection } from "./nats.js";
-import { getActiveSession } from "./knight.js";
+import { findSession, getActiveSession } from "./knight.js";
+import { listInflight, natsPrefix, podIdentity } from "./activity.js";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { listSessionFiles } from "./sessions.js";
 import {
   parseSessionFile,
@@ -20,10 +22,14 @@ interface IntrospectRequest {
   limit?: number;
   offset?: number;
   id?: string;
+  /** `recent`/`tree`/`stats`: target this run's session instead of the most recent one. */
+  runId?: string;
+  /** `recent`/`tree`/`stats`: target the live session with this pi session id. */
+  sessionId?: string;
 }
 
 const startTime = Date.now();
-let sub: Subscription | null = null;
+let subs: Subscription[] = [];
 
 // Cap how many past sessions we list and how many entries we page per request
 // (keeps the NATS reply under the ~1MB payload limit).
@@ -39,12 +45,18 @@ export function startIntrospect(config: KnightConfig): void {
   }
 
   // Derive prefix from natsResultsPrefix (e.g. "rt-dev.results" → "rt-dev")
-  const prefix = config.natsResultsPrefix.replace(/\.results$/, "");
-  const subject = `${prefix}.introspect.${config.knightName}`;
-  sub = nc.subscribe(subject);
-  log.info("Introspect responder started", { subject });
+  const prefix = natsPrefix(config);
+  const base = `${prefix}.introspect.${config.knightName}`;
+  const { pod } = podIdentity();
+  // Knight-wide subject: queue group so exactly one replica answers. Per-pod subject:
+  // reach a specific replica (the one running the task you are looking at).
+  subs = [
+    nc.subscribe(base, { queue: "introspect" }),
+    nc.subscribe(`${base}.${pod.replace(/[^A-Za-z0-9_-]/g, "_")}`),
+  ];
+  log.info("Introspect responder started", { subjects: [base, `${base}.<pod>`], pod });
 
-  (async () => {
+  for (const sub of subs) (async () => {
     for await (const msg of sub) {
       try {
         let req: IntrospectRequest = { type: "stats" };
@@ -66,6 +78,13 @@ export function startIntrospect(config: KnightConfig): void {
 }
 
 export async function handleIntrospect(req: IntrospectRequest, config: KnightConfig): Promise<unknown> {
+  const { pod, node } = podIdentity();
+  const reply = await route(req, config);
+  // Every reply says which pod answered, so a dashboard can tell replicas apart.
+  return reply && typeof reply === "object" ? { pod, ...(node ? { node } : {}), ...reply } : reply;
+}
+
+async function route(req: IntrospectRequest, config: KnightConfig): Promise<Record<string, unknown>> {
   // History browsing reads persisted JSONL files and works regardless of
   // whether an in-memory session is currently active.
   if (req.type === "history") {
@@ -75,34 +94,42 @@ export async function handleIntrospect(req: IntrospectRequest, config: KnightCon
     return buildSession(config, req.id, req.limit, req.offset);
   }
 
-  const session = getActiveSession();
+  const selecting = !!(req.runId || req.sessionId);
+  const session = selecting ? findSession({ runId: req.runId, sessionId: req.sessionId }) : getActiveSession();
+  if (selecting && !session) {
+    return { error: `No live session on this pod for ${req.runId ? `runId ${req.runId}` : `sessionId ${req.sessionId}`}` };
+  }
 
   if (!session) {
     return {
       knight: config.knightName,
       session: null,
-      runtime: {
-        uptime: Math.floor((Date.now() - startTime) / 1000),
-        activeTasks: 0,
-        model: config.knightModel,
-      },
+      inflight: listInflight(),
+      runtime: runtimeInfo(config),
     };
   }
 
   switch (req.type) {
     case "stats":
-      return buildStats(config);
+      return buildStats(config, session);
     case "recent":
-      return buildRecent(config, req.limit ?? 20);
+      return buildRecent(config, session, req.limit ?? 20);
     case "tree":
-      return buildTree(config);
+      return buildTree(config, session);
     default:
       return { error: `Unknown introspect type: ${(req as any).type}` };
   }
 }
 
-function buildStats(config: KnightConfig) {
-  const session = getActiveSession()!;
+function runtimeInfo(config: KnightConfig) {
+  return {
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    activeTasks: listInflight().length,
+    model: config.knightModel,
+  };
+}
+
+function buildStats(config: KnightConfig, session: AgentSession) {
   const stats = session.getSessionStats();
 
   return {
@@ -120,16 +147,12 @@ function buildStats(config: KnightConfig) {
       },
       cost: stats.cost,
     },
-    runtime: {
-      uptime: Math.floor((Date.now() - startTime) / 1000),
-      activeTasks: 0,
-      model: config.knightModel,
-    },
+    inflight: listInflight(),
+    runtime: runtimeInfo(config),
   };
 }
 
-function buildRecent(config: KnightConfig, limit: number) {
-  const session = getActiveSession()!;
+function buildRecent(config: KnightConfig, session: AgentSession, limit: number) {
   const entries = session.sessionManager.getEntries();
   const recent = entries.slice(-limit);
 
@@ -143,8 +166,7 @@ function buildRecent(config: KnightConfig, limit: number) {
   };
 }
 
-function buildTree(config: KnightConfig) {
-  const session = getActiveSession()!;
+function buildTree(config: KnightConfig, session: AgentSession) {
   const tree = session.sessionManager.getTree();
 
   function simplifyNode(node: { entry: any; children: any[]; label?: string }) {
