@@ -18,7 +18,7 @@ import { toolHooksExtension } from "./hooks.js";
 import { setupCompactionHook, updateSessionNotes } from "./memory.js";
 import { pruneSessionFiles } from "./sessions.js";
 import { extractStructured, type PRRef, type Verdict } from "./structured.js";
-import { describeSessionFailure, getBestAssistantResult, resolveTaskOutcome, summarizeSessionTail } from "./result-extraction.js";
+import { describeSessionFailure, getBestAssistantResult, refusalCode, resolveTaskOutcome, summarizeSessionTail } from "./result-extraction.js";
 
 
 export interface TaskResult {
@@ -36,6 +36,10 @@ export interface TaskResult {
   prs?: PRRef[];
   /** Review verdict from a final "Verdict:" line (omitted when none). */
   verdict?: Verdict;
+  /** Machine-readable refusal reason (omitted unless the provider refused the
+   *  task for affordability, e.g. OpenRouter 402 "more credits, or fewer
+   *  max_tokens") so the pipeline can defer instead of escalating. (#79) */
+  refused?: "credits";
 }
 
 /**
@@ -436,9 +440,11 @@ export async function executeTask(
     ? describeSessionFailure(sess, signal?.aborted ?? false)
     : undefined;
   const { result: resultText, success, error } = resolveTaskOutcome(deliverable, failureReason);
+  const refused = success ? undefined : refusalCode(error);
   if (!success) {
     log.warn("Task produced no deliverable", {
       error,
+      refused: refused ?? null,
       taskLength: task.length,
       runId: runId ?? null,
       sessionTail: summarizeSessionTail(sess),
@@ -478,6 +484,7 @@ export async function executeTask(
     toolCalls: taskToolCalls,
     ...(structured.prs.length > 0 ? { prs: structured.prs } : {}),
     ...(structured.verdict ? { verdict: structured.verdict } : {}),
+    ...(refused ? { refused } : {}),
   };
 }
 

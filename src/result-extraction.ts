@@ -26,6 +26,21 @@ export function isDeliverableAssistantText(text: string): boolean {
 }
 
 /**
+ * Machine-readable refusal reason for provider failures that mean "don't retry
+ * now, the account can't afford it" — like OpenRouter's 402: OpenRouter reserves
+ * credit for the full max_tokens up front, so a request with a large budget can
+ * fail with "This request requires more credits, or fewer max_tokens" while
+ * plenty of credit remains for normal-sized replies. Reported on the task result
+ * as `refused: "credits"` (machine-readable, cf. Claude plan-quota refusal in
+ * roundtable#321) so the pipeline can defer instead of escalating as a bug.
+ */
+export function refusalCode(reason?: string): "credits" | undefined {
+  if (!reason) return undefined;
+  if (!/\b402\b/.test(reason)) return undefined;
+  return /credit|max[ _-]?tokens/i.test(reason) ? "credits" : undefined;
+}
+
+/**
  * Describe why a session ended without a deliverable. The Pi agent loop never throws on
  * LLM failures — a stream error or abort ends the loop silently, recorded only as
  * stopReason "error"/"aborted" (plus errorMessage) on the final assistant message. If we
