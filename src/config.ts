@@ -24,6 +24,8 @@ export interface KnightConfig {
   sessionRetentionMaxFiles: number;
   /** Delete persisted session files older than this many days (0 = no age cap). */
   sessionRetentionDays: number;
+  /** Task activity event content: `preview` (default) or `none` (no previews / argument summaries). */
+  activityContent: "none" | "preview";
 }
 
 function requireEnv(name: string): string {
@@ -57,5 +59,6 @@ export function loadConfig(): KnightConfig {
     // Each chain run gets its own persisted session (#31); cap how many stay on disk.
     sessionRetentionMaxFiles: parseInt(process.env["SESSION_RETENTION_MAX_FILES"] ?? "100", 10),
     sessionRetentionDays: parseFloat(process.env["SESSION_RETENTION_DAYS"] ?? "30"),
+    activityContent: process.env["ACTIVITY_CONTENT"] === "none" ? "none" : "preview",
   };
 }

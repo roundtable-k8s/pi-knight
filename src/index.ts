@@ -8,6 +8,7 @@ import { executeTask, getActiveSessions, pruneOldSessions, warmSession } from ".
 import { startIntrospect } from "./introspect.js";
 import { resolveModel } from "./model.js";
 import { preflightModelUntilReady } from "./preflight.js";
+import { TaskActivity } from "./activity.js";
 import * as metrics from "./metrics.js";
 
 async function main(): Promise<void> {
@@ -86,14 +87,36 @@ async function main(): Promise<void> {
   let activeCount = 0;
   let puller: Awaited<ReturnType<typeof subscribe>> | null = null;
   let shuttingDown = false;
+  // Concurrency slots (0-based) in use, reported on task.started.
+  const usedSlots = new Set<number>();
 
   // Process a single task
   async function processTask(delivery: TaskDelivery): Promise<void> {
-    const { task: taskText, taskId, runId, model } = delivery.task;
+    const { task: taskText, taskId, runId, model, chainName, stepName, timestamp } = delivery.task;
     const timeoutMs = delivery.task.timeoutMs ?? config.taskTimeoutMs;
+    let slot = 0;
+    while (usedSlots.has(slot)) slot++;
+    usedSlots.add(slot);
+    const sentAt = timestamp ? Date.parse(timestamp) : NaN;
+    const activity = new TaskActivity(
+      config,
+      {
+        taskId,
+        runId,
+        chainName,
+        stepName,
+        model: model ?? config.knightModel,
+        ...(Number.isFinite(sentAt) ? { queuedFor: Math.max(0, Date.now() - sentAt) } : {}),
+      },
+      { content: config.activityContent },
+    );
     // Keep the message un-acked but alive while the task runs; ack only when it finishes.
-    const heartbeat = setInterval(() => delivery.working(), HEARTBEAT_MS);
+    const heartbeat = setInterval(() => {
+      delivery.working();
+      activity.heartbeat();
+    }, HEARTBEAT_MS);
     activeCount++;
+    activity.started(slot, config.maxConcurrentTasks);
     setActiveTaskCount(activeCount);
     metrics.activeTasks.labels(config.knightName).set(activeCount);
 
@@ -102,9 +125,10 @@ async function main(): Promise<void> {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const result = await executeTask(taskText, config, controller.signal, runId, taskId, { model });
+      const result = await executeTask(taskText, config, controller.signal, runId, taskId, { model, activity });
       const durationMs = Date.now() - startTime;
 
+      activity.finished({ success: result.success, error: result.error, cost: result.cost, tokens: result.tokens });
       await publishResult(taskId, {
         task_id: taskId,
         knight: config.knightName,
@@ -133,6 +157,7 @@ async function main(): Promise<void> {
       const durationMs = Date.now() - startTime;
       const errMsg = err instanceof Error ? err.message : String(err);
       log.error("Task failed", { taskId, error: errMsg });
+      activity.finished({ success: false, error: errMsg });
 
       await publishResult(taskId, {
         task_id: taskId,
@@ -152,6 +177,8 @@ async function main(): Promise<void> {
     } finally {
       clearTimeout(timeout);
       clearInterval(heartbeat);
+      activity.detach();
+      usedSlots.delete(slot);
       delivery.ack();
       activeCount--;
       setActiveTaskCount(activeCount);

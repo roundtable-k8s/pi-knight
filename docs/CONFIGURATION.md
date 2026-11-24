@@ -74,6 +74,8 @@ file under `/data/sessions`; old files are pruned at startup and on each run cha
 |----------|-------------|---------|
 | `SESSION_RETENTION_MAX_FILES` | Max persisted session files kept on the PVC (`0` = no cap) | `100` |
 | `SESSION_RETENTION_DAYS` | Delete session files not modified for this many days (`0` = no cap) | `30` |
+| `ACTIVITY_CONTENT` | `preview` publishes tool output / message previews in activity events; `none` omits them | `preview` |
+| `POD_NAME`, `NODE_NAME` | Pod identity stamped on activity events and introspect replies (downward API); falls back to hostname / unset | — |
 
 ### Observability
 | Variable | Description | Default |
