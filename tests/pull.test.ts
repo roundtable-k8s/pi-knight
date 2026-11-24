@@ -21,7 +21,7 @@ describe("pull loop (fake fetch)", () => {
   const msg = (id: string): PulledMsg => ({
     data: new TextEncoder().encode(JSON.stringify({ task: `do ${id}`, taskId: id })),
     subject: `fleet-a.tasks.x.${id}`,
-    ack() {}, working() {}, term() {},
+    ack() {}, working() {}, term() {}, nak() {},
   });
 
   it("requests exactly the number of free slots and nothing when full", async () => {
@@ -47,6 +47,27 @@ describe("pull loop (fake fetch)", () => {
     await waitFor(() => got.length === 3);
     assert.equal(requests[1], 1);
     await puller.stop();
+  });
+
+  it("naks, without handling, messages delivered from an in-flight fetch after stop", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let fetching!: () => void;
+    const inFetch = new Promise<void>((r) => { fetching = r; });
+    const calls: string[] = [];
+    const handled: string[] = [];
+    const m: PulledMsg = { ...msg("late"), nak: () => calls.push("nak") };
+    const puller = startPullLoop({
+      freeSlots: () => 1,
+      fetch: async () => (async function* () { fetching(); await gate; yield m; })(),
+      onTask: (d) => { handled.push(d.task.taskId); },
+    });
+    await inFetch;
+    const stopping = puller.stop();
+    release();
+    await stopping;
+    assert.deepEqual(handled, []);
+    assert.deepEqual(calls, ["nak"]);
   });
 
   it("terms empty payloads and acks filtered ones without running them", async () => {

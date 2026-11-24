@@ -137,6 +137,8 @@ export interface PulledMsg {
   ack(): void;
   working(): void;
   term(reason?: string): void;
+  /** Hand the message back for redelivery without running it. */
+  nak(): void;
 }
 
 /** A task taken from the stream. It stays un-acked until `ack()`; call `working()` to extend its ack window. */
@@ -193,8 +195,9 @@ export function startPullLoop(opts: PullLoopOptions): TaskPuller {
       try {
         const msgs = await opts.fetch(free, opts.fetchExpiresMs ?? FETCH_EXPIRES_MS);
         for await (const msg of msgs) {
+          // A fetch already in flight when we began draining must not start new work.
+          if (stopped) { msg.nak(); continue; }
           handleMsg(msg);
-          if (stopped) break;
         }
       } catch (err) {
         if (stopped) break;

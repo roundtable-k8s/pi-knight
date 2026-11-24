@@ -1,4 +1,20 @@
 import type { TaskResult } from "./knight.js";
+import { refusalCode } from "./result-extraction.js";
+
+/** TaskResult for a task that threw out of executeTask, so it publishes the same shape as an in-band failure. */
+export function failedTaskResult(errMsg: string, model: string): TaskResult {
+  const refused = refusalCode(errMsg);
+  return {
+    result: `Task failed: ${errMsg}`,
+    success: false,
+    error: errMsg,
+    cost: 0,
+    tokens: { input: 0, output: 0, cacheRead: 0 },
+    model,
+    toolCalls: 0,
+    ...(refused ? { refused } : {}),
+  };
+}
 
 /**
  * Build the NATS task-result payload from an executeTask result. Optional fields
