@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildResultPayload } from "../src/task-payload.js";
+import { buildResultPayload, failedTaskResult } from "../src/task-payload.js";
 import type { TaskResult } from "../src/knight.js";
 
 const base: TaskResult = {
@@ -23,4 +23,21 @@ test("buildResultPayload passes refused through to the published payload (#79)",
 test("buildResultPayload omits optional fields when unset", () => {
   const p = buildResultPayload({ ...base, success: true }, meta);
   for (const k of ["refused", "error", "prs", "verdict"]) assert.ok(!(k in p), k);
+});
+
+test("thrown 402 out-of-credits error publishes refused: credits with the usual failure fields", () => {
+  const msg = "402 This request requires more credits, or fewer max_tokens";
+  const p = buildResultPayload(failedTaskResult(msg, "p/m"), meta);
+  assert.equal(p.refused, "credits");
+  assert.equal(p.success, false);
+  assert.equal(p.error, msg);
+  assert.equal(p.result, `Task failed: ${msg}`);
+  assert.equal(p.duration_ms, 5);
+  assert.equal(p.model, "p/m");
+});
+
+test("thrown non-credit error has no refused field", () => {
+  const p = buildResultPayload(failedTaskResult("boom", "p/m"), meta);
+  assert.equal("refused" in p, false);
+  assert.equal(p.success, false);
 });

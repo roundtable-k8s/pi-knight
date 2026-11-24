@@ -7,7 +7,7 @@ import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { executeTask, getActiveSessions, pruneOldSessions, warmSession } from "./knight.js";
 import { startIntrospect } from "./introspect.js";
 import { resolveModel } from "./model.js";
-import { buildResultPayload } from "./task-payload.js";
+import { buildResultPayload, failedTaskResult } from "./task-payload.js";
 import { preflightModelUntilReady } from "./preflight.js";
 import { TaskActivity } from "./activity.js";
 import * as metrics from "./metrics.js";
@@ -146,18 +146,10 @@ async function main(): Promise<void> {
       log.error("Task failed", { taskId, error: errMsg });
       activity.finished({ success: false, error: errMsg });
 
-      await publishResult(taskId, {
-        task_id: taskId,
-        knight: config.knightName,
-        success: false,
-        result: `Task failed: ${errMsg}`,
-        error: errMsg,
-        duration_ms: durationMs,
-        cost: 0,
-        tokens: { input: 0, output: 0 },
-        model: config.knightModel,
-        timestamp: new Date().toISOString(),
-      }).catch((e) => log.error("Failed to publish error result", { error: String(e) }));
+      await publishResult(taskId, buildResultPayload(
+        failedTaskResult(errMsg, config.knightModel),
+        { taskId, knight: config.knightName, durationMs },
+      )).catch((e) => log.error("Failed to publish error result", { error: String(e) }));
 
       metrics.tasksTotal.labels(config.knightName, "error").inc();
       metrics.taskDuration.labels(config.knightName).observe(durationMs / 1000);
