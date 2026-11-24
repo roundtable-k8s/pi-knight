@@ -14,13 +14,15 @@ import { toolCallsTotal, toolCallDuration, toolCallErrors, toolCallsBlocked } fr
 
 /** Bash commands that should be blocked outright */
 const BLOCKED_BASH_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
-  { pattern: /\brm\s+-rf\s+\/(?!\w)/, reason: "Recursive delete at root level" },
+  { pattern: /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+\/(?:\s|$|\*)/, reason: "Recursive delete at root level" },
   // Match the flag as a whole token: not a branch like `fix-f`, and --force-with-lease stays allowed.
+  // Known residual false positive: the same text as a quoted argument (e.g. inside `echo`) also matches.
+  // The short-flag check (`-f` anywhere in the flag cluster) is deliberately broad; it fails safe.
   { pattern: /\bgit\s+push\b[^;&|\n]*\s--force(?=\s|$)/, reason: "Force push without lease (use --force-with-lease or new commits)" },
   { pattern: /\bgit\s+push\b[^;&|\n]*\s-[a-zA-Z]*f[a-zA-Z]*(?=\s|$)/, reason: "Force push (use new commits instead)" },
-  { pattern: /\bchmod\s+777\b/, reason: "World-writable permissions" },
+  { pattern: /\bchmod\s+(-R\s+)?777\b/, reason: "World-writable permissions" },
   { pattern: /\bdd\s+.*of=\/dev\//, reason: "Direct device write" },
-  { pattern: /\bmkfs\b/, reason: "Filesystem format" },
+  { pattern: /\bmkfs(\.\w+)?\b/, reason: "Filesystem format" },
 ];
 
 /** Patterns that indicate secrets in tool output */

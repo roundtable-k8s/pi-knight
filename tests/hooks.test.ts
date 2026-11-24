@@ -25,6 +25,17 @@ test("findBlockedBashReason blocks dangerous commands and allows safe ones", () 
   assert.equal(findBlockedBashReason("ls -la /tmp"), undefined);
 });
 
+test("findBlockedBashReason blocks the rm, chmod and mkfs spellings claude-knight blocks", () => {
+  assert.match(findBlockedBashReason("rm -fr /") ?? "", /root/i);
+  assert.match(findBlockedBashReason("rm -rf /*") ?? "", /root/i);
+  assert.match(findBlockedBashReason("chmod -R 777 x") ?? "", /world-writable/i);
+  assert.match(findBlockedBashReason("chmod 777 x") ?? "", /world-writable/i);
+  assert.match(findBlockedBashReason("mkfs.ext4 /dev/sda") ?? "", /filesystem/i);
+  assert.match(findBlockedBashReason("mkfs /dev/sda") ?? "", /filesystem/i);
+  assert.equal(findBlockedBashReason("rm -rf ./build"), undefined);
+  assert.equal(findBlockedBashReason("chmod 755 script.sh"), undefined);
+});
+
 test("containsSecret is stable across repeated calls (global regex lastIndex)", () => {
   const text = `token ghp_${"a".repeat(36)}`;
   for (let i = 0; i < 4; i++) assert.equal(containsSecret(text), true, `call ${i}`);
