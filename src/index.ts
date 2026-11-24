@@ -7,6 +7,7 @@ import { loadSkills } from "@earendil-works/pi-coding-agent";
 import { executeTask, getActiveSessions, pruneOldSessions, warmSession } from "./knight.js";
 import { startIntrospect } from "./introspect.js";
 import { resolveModel } from "./model.js";
+import { buildResultPayload } from "./task-payload.js";
 import { preflightModelUntilReady } from "./preflight.js";
 import { TaskActivity } from "./activity.js";
 import * as metrics from "./metrics.js";
@@ -129,21 +130,7 @@ async function main(): Promise<void> {
       const durationMs = Date.now() - startTime;
 
       activity.finished({ success: result.success, error: result.error, cost: result.cost, tokens: result.tokens });
-      await publishResult(taskId, {
-        task_id: taskId,
-        knight: config.knightName,
-        success: result.success,
-        result: result.result,
-        ...(result.error ? { error: result.error } : {}),
-        duration_ms: durationMs,
-        cost: result.cost,
-        tokens: result.tokens,
-        model: result.model,
-        tool_calls: result.toolCalls,
-        ...(result.prs ? { prs: result.prs } : {}),
-        ...(result.verdict ? { verdict: result.verdict } : {}),
-        timestamp: new Date().toISOString(),
-      });
+      await publishResult(taskId, buildResultPayload(result, { taskId, knight: config.knightName, durationMs }));
 
       // Token/cost are recorded regardless — a no-output task still spent them. Only the
       // task-outcome counter reflects the honest success/failure. (#31)

@@ -5,6 +5,7 @@ import {
   extractTextFromAssistantContent,
   getBestAssistantResult,
   isDeliverableAssistantText,
+  refusalCode,
   resolveTaskOutcome,
   summarizeSessionTail,
 } from "../src/result-extraction.ts";
@@ -192,4 +193,17 @@ test("summarizeSessionTail reports roles, stopReasons and part-type counts witho
   // Content must never leak into logs — only lengths/counts.
   assert.ok(!JSON.stringify(tail).includes("secret task text"));
   assert.ok(!JSON.stringify(tail).includes("private"));
+});
+
+test("refusalCode detects OpenRouter 402 credit/max_tokens refusals (#79)", () => {
+  assert.equal(
+    refusalCode(
+      "LLM call failed: 402 This request requires more credits, or fewer max_tokens. You requested up to 937632 tokens, but can only afford 240095",
+    ),
+    "credits",
+  );
+  assert.equal(refusalCode("LLM call failed: 402 insufficient credits"), "credits");
+  assert.equal(refusalCode("LLM call failed: 429 rate limited"), undefined, "429 is not a refusal");
+  assert.equal(refusalCode("Agent produced no deliverable output"), undefined, "no 402, no refusal");
+  assert.equal(refusalCode(undefined), undefined);
 });
