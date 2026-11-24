@@ -1,5 +1,5 @@
 import { mkdir, rm } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   createAgentSession,
@@ -183,10 +183,15 @@ export function __setSessionFactoryForTests(
 /**
  * Per-task workspace directory name, filesystem-safe. Prefixed `run-` / `task-` to mirror
  * the slot key, so a run-less taskId can never share a dir with a concurrent run's id.
+ * A stable hash of the raw id is always appended: sanitising maps distinct ids onto the same
+ * characters (`a/b` and `a_b`), and the suffix keeps their directories apart. Length stays
+ * bounded (at most 5 + 100 + 9 characters).
  */
 export function workspaceName(runId: string | undefined, taskId: string): string {
-  const safe = (runId || taskId).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "x";
-  return `${runId ? "run" : "task"}-${safe}`;
+  const raw = runId || taskId;
+  const safe = raw.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || "x";
+  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 8);
+  return `${runId ? "run" : "task"}-${safe}-${hash}`;
 }
 
 async function createSession(config: KnightConfig, cwd: string): Promise<AgentSession> {
@@ -344,11 +349,12 @@ export async function executeTask(
     }
     sess = slot.session;
   } catch (err) {
-    // Session creation failed: release the lock or later steps of this run would wait forever.
+    // Session creation failed. Remove the directory before releasing the lock, or a queued
+    // step of this run could recreate it and have its fresh workspace deleted underneath it.
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
     slot.pending--;
     releaseLock();
     if (!slot.session && slot.pending === 0) slots.delete(slot.key);
-    await rm(workDir, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
   lastActive = slot;
